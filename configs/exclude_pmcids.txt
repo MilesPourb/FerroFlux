@@ -1,0 +1,17 @@
+# Tier-3 Quarantined Bradbury / Overholtzer / Wiesner PubMed Central Articles (15 PMCIDs)
+# Hard-blocked prior to AWS s3://pmc-oa-opendata/ download and LLM/table extraction.
+PMC5108575
+PMC7644276
+PMC12916478
+PMC13014609
+PMC13314319
+PMC13440254
+PMC7310667
+PMC7171978
+PMC6175906
+PMC5679295
+PMC5675572
+PMC6420223
+PMC6589353
+PMC11392819
+PMC11059358

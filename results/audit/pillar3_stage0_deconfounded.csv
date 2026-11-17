@@ -1,0 +1,4 @@
+ensemble,gse310954_uncond_auroc,gse310954_uncond_mwu_p,gse310954_uncond_sting_rho,gse310954_fwd_ct_only_gm_gt_f10_match,gse319397_sterol_rho_with_direct_mrna,gse319397_sterol_rho_when_ebp_sc5d_dhcr7_masked,prostate_tiers_uncond_rho
+BASE_academic,0.0,0.0043,-0.4727,False,0.85,-0.4667,0.0101
+XL_academic,0.8333,0.0823,-0.1,False,0.7333,0.15,0.2223
+XL_open,0.3,0.329,-0.3727,False,0.4167,0.0167,0.0546

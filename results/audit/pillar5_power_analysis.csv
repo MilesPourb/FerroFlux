@@ -1,0 +1,5 @@
+cohort,n_samples,min_detectable_rho_80pct_power_alpha05,min_possible_exact_mann_whitney_p,can_ever_reach_p_lt_0_001_binary
+Zenodo 18271042 Live-Cell Spatial FOVs,8,0.8491,0.028571,False
+GSE319397 Myc-CaP Prostate C' Dot RNA-seq,9,0.8157,0.015873,False
+GSE310954 Melanoma C' Dot RNA-seq,11,0.7576,0.004329,False
+Pooled GSE319397 + GSE319419 Prostate RNA-seq,21,0.5786,6e-06,True

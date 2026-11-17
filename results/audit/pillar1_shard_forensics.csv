@@ -1,0 +1,15 @@
+shard,rows,cols,size_mb,exact_scalar_duplicates,quarantine_hits,license_counts,top_sources,basal_model_id_match_rate
+cells_basal_multiomics.parquet,2454,15,21.504,0,0,{'open': 2454},"{'DepMap_24Q4': 1673, 'BeatAML_v4': 707, 'Sanger_CMP_3D_Organoids': 74}",
+chem_ferrdb_qhts_chembl_features.parquet,53984,39,11.342,0,0,"{'open': 52472, 'academic': 1512}","{'PubChem_AID_686970': 4794, 'PubChem_AID_686971': 4793, 'PubChem_AID_887': 4773, 'PubChem_AID_588453': 4742, 'PubChem_AID_1671190': 4127, 'PubChem_AID_1452': 3330}",
+cis_reg_64loci_epigenomics.parquet,936,17,0.839,0,0,{'open': 936},{'ENCODE4_V4+TCGA_ATAC+CCLE_RRBS_GCP': 936},
+clinical_icb_cohorts.parquet,502,16,4.352,0,0,{'open': 502},"{'Braun2020_CheckMate_ccRCC': 311, 'Riaz2017_Melanoma_AntiPD1': 109, 'JerbyArnon2018_Melanoma_scICB': 32, 'Hugo2016_Melanoma_AntiPD1': 28, 'Cloughesy2019_GBM_AntiPD1': 22}",
+crispr_chronos_2d_3d.parquet,200617,13,2.029,0,0,{'open': 200617},"{'DepMap_24Q4_Chronos': 171734, 'Sanger_Organoids_20260723': 22032, 'BioGRID_ORCS_v2.0.18': 4997, 'DepMap_NextGen_3D_Minipool': 1854}",0.946
+cysdb_abpp_ligandability.parquet,41474,25,0.901,0,0,{'open': 41474},{'CysDB_v1.0_BackusLab_ABPP': 41474},
+drugcomb_synergy_blocks.parquet,224028,27,9.581,0,0,{'open': 224028},{'DrugComb_v1.5': 224028},0.7162
+normal_organ_til_baselines.parquet,206,9,0.685,0,0,{'open': 206},"{'HPA_SingleCell_v24': 155, 'HPA_TissueConsensus_v24': 51}",
+perturb_transcriptomes.parquet,13517,17,110.253,0,0,"{'open': 8387, 'academic': 5130}","{'PIE_x_atlas_orion': 5000, 'Tahoe_100M': 3592, 'PIE_replogle_nadig_essential': 2500, 'LINCS2020_trt_cp': 1575, 'PIE_jiang': 461, 'PIE_arc_vcc_25': 190}",0.9572
+perturbed_oxylipidomics_sterolomics.parquet,101341,18,2.591,499,0,"{'open': 81414, 'academic': 19927}","{'MetaboLights_MTBLS8280': 44532, 'MetaboLights_MTBLS15364': 21387, 'MetaboLights_MTBLS1399': 9972, 'MetabolomicsWorkbench_ST004203': 7510, 'MetabolomicsWorkbench_ST001334': 6557, 'MetaboLights_MTBLS774': 5033}",0.4864
+pharmacogenomic_viability.parquet,91800,17,1.685,0,0,{'open': 91800},"{'CTRPv2': 32028, 'PRISM_24Q2_Primary': 26906, 'PRISM_19Q4_Secondary': 16120, 'GDSC2_v8.5': 13149, 'BeatAML_v4': 3597}",0.9625
+physical_anchors_metabolomics_lipidomics.parquet,928,249,2.093,0,0,{'open': 928},{'CCLE-Metabolomics-928': 928},
+physical_anchors_proteomics.parquet,1525,48,12.273,0,0,{'open': 1525},"{'ProCan-DepMapSanger-949': 948, 'CCLE-TMT-375': 375, 'CPTAC-ccRCC': 103, 'CPTAC-GBM': 99}",
+pmc_oa_rescue_and_bionano.parquet,955,24,0.045,0,0,"{'open': 590, 'academic': 365}",{'PMC_OA_S3_FullText_Extraction': 955},0.3571

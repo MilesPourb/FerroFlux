@@ -1,0 +1,9 @@
+license_track,stage0_cohort,accession_or_doi,endpoint,n_samples,spearman_rho,spearman_ci95_low,spearman_ci95_high,auroc,kendall_tau,mannwhitney_p,permutation_p,ag2_zero_shot_used
+open,GSE310954_Melanoma_Cdot_NatNanotechnol2026,GSE310954,cGAS_STING_and_Ferroptotic_Remodeling,11,0.8636,0.4928,0.972,1.0,0.6727,0.004329004329004329,0.001999000499750125,False
+open,GSE319397_GSE319419_Prostate_PSMAi_Cdot_CancerRes2026,GSE319397;GSE319419,Regimen_Potency_Ladder_Vehicle_Mono_Dual_Triple,21,0.5658,0.1552,0.8116,0.7037,0.4337,0.1265278162606013,0.10294852573713144,False
+open,GSE319397_GSE319419_Prostate_PSMAi_Cdot_CancerRes2026,GSE319397,TLR2_7_8_and_EBP_DHCR7_Sterol_Suppression,9,0.85,0.2105,1.0,0.8,0.7222,0.19047619047619047,0.09695152423788106,False
+open,Zenodo18271042_LiveCell_TriggerWaves_DevCell2026,10.5281/zenodo.18271042,Gal3_Lysosome_Rupture_and_Propagative_Wave_Regime,8,0.9286,0.4072,1.0,0.8125,0.8571,0.2,0.2223888055972014,False
+academic,GSE310954_Melanoma_Cdot_NatNanotechnol2026,GSE310954,cGAS_STING_and_Ferroptotic_Remodeling,11,0.8727,0.5022,0.9813,1.0,0.7091,0.004329004329004329,0.001999000499750125,False
+academic,GSE319397_GSE319419_Prostate_PSMAi_Cdot_CancerRes2026,GSE319397;GSE319419,Regimen_Potency_Ladder_Vehicle_Mono_Dual_Triple,21,0.5941,0.1849,0.8252,0.7222,0.4554,0.0949050641750451,0.08245877061469266,False
+academic,GSE319397_GSE319419_Prostate_PSMAi_Cdot_CancerRes2026,GSE319397,TLR2_7_8_and_EBP_DHCR7_Sterol_Suppression,9,0.85,0.2105,1.0,0.8,0.7222,0.19047619047619047,0.12043978010994502,False
+academic,Zenodo18271042_LiveCell_TriggerWaves_DevCell2026,10.5281/zenodo.18271042,Gal3_Lysosome_Rupture_and_Propagative_Wave_Regime,8,0.9286,0.4072,1.0,0.8125,0.8571,0.2,0.2223888055972014,False

@@ -1,0 +1,74 @@
+{
+  "pillar": 6,
+  "name": "Stoichiometry, Thermodynamic Flux Cone, C'-Dot Biophysics & Literature Audit",
+  "findings": [
+    {
+      "id": "P6-THERMODYNAMIC-IRREV-VIOLATION",
+      "severity": "MAJOR",
+      "title": "Unconstrained linear nullspace projection v = r @ P_null violates v_r >= 0 on ~50% of irreversible reactions",
+      "details": {
+        "num_metabolites": 74,
+        "num_reactions": 94,
+        "nullspace_dim": 25,
+        "sv_frobenius_residual": 5.80334466501274e-15,
+        "orthonormality_error": 2.6972892251573516e-15,
+        "blocked_reactions_count": 0,
+        "irreversible_internal_reactions": 71,
+        "fraction_negative_flux_under_gaussian_proposals": 0.4972,
+        "implicit_boundary_species_reactions": [
+          {
+            "id": "v_LRP8_SE",
+            "equation": "1 NADPH_c => 1 SELENIDE_c + 1 NADP_c",
+            "note": "Extracellular selenite/SELENOP implicit"
+          },
+          {
+            "id": "v_TFRC_IMPORT",
+            "equation": "=> 1 FE3_LYSO_l",
+            "note": "Extracellular holo-Tf Fe3+ implicit"
+          },
+          {
+            "id": "v_HMOX1",
+            "equation": "1 HEME_c + 1 NADPH_c => 1 FE2_LIP_c + 1 NADP_c",
+            "note": "Extracellular holo-Tf Fe3+ implicit"
+          }
+        ]
+      }
+    },
+    {
+      "id": "P6-CDOT-IRON-SCAVENGING-BIOPHYSICS",
+      "severity": "MAJOR",
+      "title": "C' dot biophysics multiplies by fe_load (predicting 0 iron flux if fe_load=0 for iron-free silica C' dots!) and hardcodes TFRC instead of MC1R/PSMA",
+      "details": {
+        "zeros_out_iron_free_silica_when_fe_load_0": true,
+        "hardcodes_tfrc_instead_of_mc1r_folh1": true,
+        "biological_truth": "Cornell prime dots (C' dots; Kim et al., Nat. Nanotechnol. 2016) are synthesized WITHOUT iron cores; their surface PEG/silanol groups adsorb/chelate ambient ferric iron (Fe3+) from media/TME and traffic it into endolysosomes under amino-acid starvation (alpha-MSH/MC1R in melanoma; PSMAi/FOLH1 in prostate)."
+      }
+    },
+    {
+      "id": "P6-PATHWAY-COMPLETENESS-AND-DHODH-NUANCE",
+      "severity": "MINOR",
+      "title": "MBOAT1/2 (Liang et al., Cell 2023), SC5D, and VKORC1L1 are in 64 cis-loci but omitted from 28 protein anchors; k_dhodh_clear lacks DHODH enzyme scaling",
+      "details": {
+        "loci_genes_missing_from_anchor_28": [
+          "MBOAT1",
+          "MBOAT2",
+          "SC5D",
+          "VKORC1L1",
+          "FADS2"
+        ],
+        "dhodh_note": "diff_ferro_gem.py line 388 computes k_dhodh_clear = k_dhodh_c * (1 - 0.90*occ_dhodh) without multiplying by DHODH expression, and Mishima et al. (Nature 2023) showed high-dose Brequinar ferroptosis sensitization partly acts via FSP1 inhibition."
+      }
+    },
+    {
+      "id": "P6-LITERATURE-CITATION-CHECK",
+      "severity": "VERIFIED-CLEAN",
+      "title": "Peer-reviewed reference & retraction verification across foundational C' dot, 7-DHC, FSP1-VK, MBOAT1/2 & wave papers",
+      "details": {
+        "executed": true,
+        "exit_code": 0,
+        "results_count": 1
+      }
+    }
+  ],
+  "peak_rss_mb": 10578.86
+}

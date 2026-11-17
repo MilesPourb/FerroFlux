@@ -1,0 +1,8 @@
+license_track,ablation_variant,retrained_from_scratch,model_size,ood_split,n_train,n_test,spearman_rho,spearman_ci95_low,spearman_ci95_high,delta_rho_vs_full,paired_perm_p_vs_full,rmse,lethal_auroc,delta_expr_pearson_r,rta_dfo_rescue_rate,cuproptosis_invariance_err,sterol_dhcr7_vs_ebp_sign_acc,sec46_depletion_drop,train_eval_sec,q_value_bh_fdr
+open,Full_FerroFlux_FM,True,v2_login,2_leave_out_lineage_ccrcc_melanoma,113571,1500,0.3728,0.3304,0.4139,0.0,1.0,0.212,0.6731,0.1772,1.0,0.0,1.0,0.7219,1807.66,1.0
+open,No_DiffFerroGEM,True,v2_login,2_leave_out_lineage_ccrcc_melanoma,113571,1500,0.3214,0.2741,0.3709,-0.0514,0.0005,0.2215,0.6467,0.1773,0.5,0.0,0.5,0.7401,1803.49,0.001
+open,No_Sec46_Gate,True,v2_login,2_leave_out_lineage_ccrcc_melanoma,113571,1500,0.3653,0.3181,0.4126,-0.0075,0.473263,0.2118,0.6646,0.1697,1.0,0.0,1.0,0.0,1858.38,0.473263
+open,No_Survivorship_IPW,True,v2_login,2_leave_out_lineage_ccrcc_melanoma,113571,1500,0.378,0.3377,0.4198,0.0052,0.297851,0.2089,0.6757,0.1461,1.0,0.0,1.0,0.711,1736.08,0.357421
+open,No_ChemPrior_qHTS_ABPP,True,v2_login,2_leave_out_lineage_ccrcc_melanoma,113571,1500,0.3432,0.2942,0.3945,-0.0296,0.052474,0.2138,0.6584,0.1346,1.0,0.0,1.0,0.7984,1771.17,0.078711
+open,No_Physical_Anchors,True,v2_login,2_leave_out_lineage_ccrcc_melanoma,113571,1500,0.2232,0.1721,0.2708,-0.1496,0.0005,0.3477,0.5985,0.0944,1.0,0.0,1.0,0.9015,1710.14,0.001
+open,CisRegPriorSlot_Zeroed,True,v2_login,2_leave_out_lineage_ccrcc_melanoma,113571,1500,0.3371,0.2917,0.3833,-0.0357,0.0005,0.2128,0.6529,0.1732,1.0,0.0,1.0,0.8592,1686.39,0.001

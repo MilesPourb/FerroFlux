@@ -1,0 +1,118 @@
+{
+  "pillar": 3,
+  "name": "Stage-0 Blind Validation Circularity, mRNA Tautology & Spatial Decomposition",
+  "findings": [
+    {
+      "id": "P3-GEO-COL-ALIGNMENT",
+      "severity": "VERIFIED-CLEAN",
+      "title": "Audit of GSM-to-expression-column alignment across GSE310954, GSE319397, and GSE319419",
+      "details": {
+        "total_samples": 32,
+        "positional_fallbacks_count": 0,
+        "sample_alignments_gse319397": [
+          {
+            "gsm_id": "GSM9517314",
+            "title": "Control (Saline treatment) mouse tumor 1",
+            "matched_col": "S1",
+            "method": "exact_token"
+          },
+          {
+            "gsm_id": "GSM9517315",
+            "title": "Control (Saline treatment) mouse tumor 2",
+            "matched_col": "S2",
+            "method": "exact_token"
+          },
+          {
+            "gsm_id": "GSM9517316",
+            "title": "Control (Saline treatment) mouse tumor 3",
+            "matched_col": "S3",
+            "method": "exact_token"
+          },
+          {
+            "gsm_id": "GSM9517317",
+            "title": "Dual Tx treatment mouse tumor 1",
+            "matched_col": "DT1",
+            "method": "exact_token"
+          },
+          {
+            "gsm_id": "GSM9517318",
+            "title": "Dual Tx treatment mouse tumor 2",
+            "matched_col": "DT2",
+            "method": "exact_token"
+          }
+        ],
+        "fallback_rows": []
+      }
+    },
+    {
+      "id": "P3-TREATMENT-INPUT-CIRCULARITY",
+      "severity": "CRITICAL",
+      "title": "Cohort 1 (AUROC=1.00) and Cohort 2 regimen ladder (rho=0.59) fed ground-truth treatment arms into np_params/media",
+      "details": [
+        {
+          "ensemble": "BASE_academic",
+          "gse310954_uncond_auroc": 0.0,
+          "gse310954_uncond_mwu_p": 0.0043,
+          "gse310954_uncond_sting_rho": -0.4727,
+          "gse310954_fwd_ct_only_gm_gt_f10_match": false,
+          "gse319397_sterol_rho_with_direct_mrna": 0.85,
+          "gse319397_sterol_rho_when_ebp_sc5d_dhcr7_masked": -0.4667,
+          "prostate_tiers_uncond_rho": 0.0101
+        },
+        {
+          "ensemble": "XL_academic",
+          "gse310954_uncond_auroc": 0.8333,
+          "gse310954_uncond_mwu_p": 0.0823,
+          "gse310954_uncond_sting_rho": -0.1,
+          "gse310954_fwd_ct_only_gm_gt_f10_match": false,
+          "gse319397_sterol_rho_with_direct_mrna": 0.7333,
+          "gse319397_sterol_rho_when_ebp_sc5d_dhcr7_masked": 0.15,
+          "prostate_tiers_uncond_rho": 0.2223
+        },
+        {
+          "ensemble": "XL_open",
+          "gse310954_uncond_auroc": 0.3,
+          "gse310954_uncond_mwu_p": 0.329,
+          "gse310954_uncond_sting_rho": -0.3727,
+          "gse310954_fwd_ct_only_gm_gt_f10_match": false,
+          "gse319397_sterol_rho_with_direct_mrna": 0.4167,
+          "gse319397_sterol_rho_when_ebp_sc5d_dhcr7_masked": 0.0167,
+          "prostate_tiers_uncond_rho": 0.0546
+        }
+      ]
+    },
+    {
+      "id": "P3-MRNA-STEROL-TAUTOLOGY",
+      "severity": "CRITICAL",
+      "title": "Cohort 2 [7-DHC] validation compares model EBP/DHCR7 formula against input EBP/SC5D-DHCR7 mRNA; correlation collapses when those 3 genes are masked",
+      "details": {
+        "BASE_academic": {
+          "unmasked_rho": 0.85,
+          "masked_rho": -0.4667
+        },
+        "XL_academic": {
+          "unmasked_rho": 0.7333,
+          "masked_rho": 0.15
+        },
+        "XL_open": {
+          "unmasked_rho": 0.4167,
+          "masked_rho": 0.0167
+        }
+      }
+    },
+    {
+      "id": "P3-ZENODO-WAVE-DECOMPOSITION",
+      "severity": "MAJOR",
+      "title": "Decomposition of Cohort 3 (Zenodo 18271042) rho=0.9286 between internal PDE u_final/Moran's I vs external geometric paracrine_factor",
+      "details": {
+        "n_fovs": 8,
+        "rho_u_final_mean_alone": 0.7619,
+        "rho_morans_i_alone": 0.3571,
+        "rho_propagative_prob_alone": 0.0,
+        "rho_external_paracrine_factor_alone": 0.9048,
+        "rho_combined_product_reported": 0.9286
+      }
+    }
+  ],
+  "peak_rss_mb": 10578.86
+}

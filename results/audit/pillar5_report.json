@@ -1,0 +1,139 @@
+{
+  "pillar": 5,
+  "name": "Statistical Hypothesis Testing, Calibration & Power Forensics",
+  "findings": [
+    {
+      "id": "P5-TEST-SUBSET-SIZE-MISMATCH",
+      "severity": "CRITICAL",
+      "title": "ood_benchmark_summary.csv evaluated FerroFlux-FM on n_test=512 subset while baselines were evaluated on full test splits",
+      "details": [
+        {
+          "track": "open",
+          "split": "1_leave_out_scaffold",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 17092
+        },
+        {
+          "track": "open",
+          "split": "2_leave_out_lineage_ccrcc_melanoma",
+          "ferroflux_n_test": 504,
+          "baseline_n_test": 4355
+        },
+        {
+          "track": "open",
+          "split": "3_2d_to_3d_organoid_pdx",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 23165
+        },
+        {
+          "track": "open",
+          "split": "4_dual_crispr_fin_epistasis",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 4997
+        },
+        {
+          "track": "open",
+          "split": "5_cuproptosis_elesclomol_specificity",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 1493
+        },
+        {
+          "track": "open",
+          "split": "6_sfti_tumor_vs_normal_til",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 1795
+        },
+        {
+          "track": "academic",
+          "split": "1_leave_out_scaffold",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 6508
+        },
+        {
+          "track": "academic",
+          "split": "2_leave_out_lineage_ccrcc_melanoma",
+          "ferroflux_n_test": 504,
+          "baseline_n_test": 4355
+        },
+        {
+          "track": "academic",
+          "split": "3_2d_to_3d_organoid_pdx",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 23165
+        },
+        {
+          "track": "academic",
+          "split": "4_dual_crispr_fin_epistasis",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 4997
+        },
+        {
+          "track": "academic",
+          "split": "5_cuproptosis_elesclomol_specificity",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 1493
+        },
+        {
+          "track": "academic",
+          "split": "6_sfti_tumor_vs_normal_til",
+          "ferroflux_n_test": 512,
+          "baseline_n_test": 1730
+        }
+      ]
+    },
+    {
+      "id": "P5-ZERO-PVALUE-AND-NO-FDR",
+      "severity": "MAJOR",
+      "title": "Unpaired normal-approx z-tests rounded to exact p=0.0 without paired item alignment, cluster-bootstrap SE, or BH-FDR correction",
+      "details": {
+        "rows_with_exact_p_zero": 5,
+        "total_ood_rows": 12,
+        "has_fdr_column": false,
+        "st0_has_fdr_column": false
+      }
+    },
+    {
+      "id": "P5-STAGE0-SMALL-N-POWER-CEILING",
+      "severity": "MAJOR",
+      "title": "Public Stage-0 cohorts (n=8..21) hit combinatoric p-value floors (e.g. n=8 balanced min Mann-Whitney p=0.0286; cannot reach p<0.001)",
+      "details": {
+        "stage0_power": [
+          {
+            "cohort": "Zenodo 18271042 Live-Cell Spatial FOVs",
+            "n_samples": 8,
+            "min_detectable_rho_80pct_power_alpha05": 0.8491,
+            "min_possible_exact_mann_whitney_p": 0.028571,
+            "can_ever_reach_p_lt_0_001_binary": false
+          },
+          {
+            "cohort": "GSE319397 Myc-CaP Prostate C' Dot RNA-seq",
+            "n_samples": 9,
+            "min_detectable_rho_80pct_power_alpha05": 0.8157,
+            "min_possible_exact_mann_whitney_p": 0.015873,
+            "can_ever_reach_p_lt_0_001_binary": false
+          },
+          {
+            "cohort": "GSE310954 Melanoma C' Dot RNA-seq",
+            "n_samples": 11,
+            "min_detectable_rho_80pct_power_alpha05": 0.7576,
+            "min_possible_exact_mann_whitney_p": 0.004329,
+            "can_ever_reach_p_lt_0_001_binary": false
+          },
+          {
+            "cohort": "Pooled GSE319397 + GSE319419 Prostate RNA-seq",
+            "n_samples": 21,
+            "min_detectable_rho_80pct_power_alpha05": 0.5786,
+            "min_possible_exact_mann_whitney_p": 6e-06,
+            "can_ever_reach_p_lt_0_001_binary": true
+          }
+        ],
+        "recommended_stage1_sample_sizes": {
+          "for_rho_0.50_at_p001_power80": 60,
+          "for_rho_0.60_at_p001_power80": 39,
+          "for_rho_0.40_at_p005_power80": 78
+        }
+      }
+    }
+  ],
+  "peak_rss_mb": 10578.86
+}

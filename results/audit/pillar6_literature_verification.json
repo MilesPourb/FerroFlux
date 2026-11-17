@@ -1,0 +1,313 @@
+{
+  "query_count": 5,
+  "verified_count": 0,
+  "records": [
+    {
+      "query": "Kim 2016 ultrasmall nanoparticles induce ferroptosis nutrient-deprived cancer cells Nature Nanotechnology",
+      "identity_confirmed": false,
+      "scite_top_match": {
+        "title": "Mapping the evolution and research landscape of <strong class=\"highlight\">ferroptosis</strong>-targeted nanomedicine: insights from a scientometric analysis",
+        "authors": [
+          "Siyang Cao",
+          "Yihao Wei",
+          "Yaohang Yue",
+          "Deli Wang",
+          "Jun Qiang Yang",
+          "Ao Xiong",
+          "Hui Zeng"
+        ],
+        "year": 2024,
+        "journal": "Frontiers in Pharmacology",
+        "volume": "15",
+        "page": null,
+        "doi": "10.3389/fphar.2024.1477938",
+        "tally": {
+          "total": 4,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 4,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 11
+        },
+        "citation_counts": {
+          "total": 4,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 4,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 11
+        },
+        "editorial_notices": [],
+        "is_oa": true,
+        "abstract": "ObjectiveNotable progress has been made in \u201c<strong class=\"highlight\">ferroptosis</strong>-based nano drug delivery systems (NDDSs)\u201d over the past 11\u00a0years. Despite the ongoing absence of a comprehensive scientometric overview and up-to-date scientific mapping research, especially regarding the evolution, critical research pathways, current research landscape, central investigative themes, and future directions.MethodsData ranging from 1 January 2012, to 30 November 2023, were obtained from the Web of Science database. A variety of advanced analytical tools were employed for detailed scientometric and visual analyses.ResultsThe results show that China significantly led the field, contributing 82.09% of the total publications, thereby largely shaping the research domain. Chen Yu emerged as the most productive author in this field. Notably, the journal ACS Nano had the greatest number of relevant publications. The study identified liver neoplasms, pancreatic neoplasms, gliomas, neoplasm metastases, and melanomas as the top five crucial disorders in this research area.ConclusionThis research provides a comprehensive scientometric assessment, enhancing our understanding of NDDSs focused on <strong class=\"highlight\">ferroptosis</strong>. Consequently, it enables rapid access to essential information and facilitates the extraction of novel ideas in the field of ferroptotic nanomedicine for both experienced and emerging researchers.",
+        "citations_preview": [
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.3389/fphar.2024.1477938",
+            "section": "results"
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.3389/fphar.2024.1477938",
+            "section": "discussion"
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.3389/fphar.2024.1477938",
+            "section": "results"
+          }
+        ]
+      },
+      "consensus_top_match": {
+        "error": "HTTP Error 429: Too Many Requests"
+      }
+    },
+    {
+      "query": "Freitas 2024 7-dehydrocholesterol intrinsic suppressor ferroptosis Nature",
+      "identity_confirmed": false,
+      "scite_top_match": {
+        "title": "Peroxidation rate constants and mechanisms of isoprenoid-derived lipids and their roles in <strong class=\"highlight\">ferroptosis</strong>",
+        "authors": [
+          "Noelle Reimers",
+          "Libin Xu"
+        ],
+        "year": 2025,
+        "journal": "Redox Biochemistry and Chemistry",
+        "volume": "13",
+        "page": "100058",
+        "doi": "10.1016/j.rbc.2025.100058",
+        "tally": {
+          "total": 0,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 0,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 3
+        },
+        "citation_counts": {
+          "total": 0,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 0,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 3
+        },
+        "editorial_notices": [],
+        "is_oa": true,
+        "abstract": null,
+        "citations_preview": [
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.1016/j.rbc.2025.100058",
+            "section": "cholesterol and desmosterol"
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.1016/j.rbc.2025.100058",
+            "section": "cholesterol and desmosterol"
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.1016/j.rbc.2025.100058",
+            "section": "peroxidation rate constants of isoprenoid-derived lipids"
+          }
+        ]
+      },
+      "consensus_top_match": {
+        "error": "HTTP Error 429: Too Many Requests"
+      }
+    },
+    {
+      "query": "Mishima 2022 FSP1 non-canonical vitamin K cycle suppresses ferroptosis Nature",
+      "identity_confirmed": false,
+      "scite_top_match": {
+        "title": "A genome-wide CRISPR-Cas9 knockout screen reveals <strong class=\"highlight\">FSP1</strong> as warfarin-resistant <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong> reductase",
+        "authors": [
+          "Da\u2010Yun Jin",
+          "Xuejie Chen",
+          "Yizhou Liu",
+          "Craig M. Williams",
+          "Lars Christian Pedersen",
+          "Darrel W. Stafford",
+          "Jian\u2010Ke Tie"
+        ],
+        "year": 2022,
+        "journal": "",
+        "volume": null,
+        "page": null,
+        "doi": "10.21203/rs.3.rs-2039668/v1",
+        "tally": {
+          "total": 3,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 3,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 2
+        },
+        "citation_counts": {
+          "total": 3,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 3,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 2
+        },
+        "editorial_notices": [],
+        "is_oa": true,
+        "abstract": "Abstract\n        <strong class=\"highlight\">Vitamin</strong> <strong class=\"highlight\">K</strong> is a vital micronutrient implicated in a variety of human diseases1. Warfarin, a <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong> antagonist, is the most commonly prescribed oral anticoagulant2. Warfarin exerts its effect by inhibiting <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong> epoxide reductase (VKOR) leading to the depletion of reduced <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong>, a cofactor of gamma-glutamyl carboxylase (GGCX) required for the post-translational modification of proteins with diverse functions. Patients overdosed on warfarin can be rescued by administering high doses of <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong> because of the existence of a warfarin-resistant <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong> reductase (VKR)3,4. Despite the functional discovery of VKR over eight decades ago, the identity of VKR remained elusive. Here, we report the identification of warfarin-resistant VKR using a genome-wide CRISPR-Cas9 knockout screening with a novel <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong>-dependent (VKD) apoptotic reporter cell line. We found that <strong class=\"highlight\">ferroptosis</strong> suppressor protein 1 (<strong class=\"highlight\">FSP1</strong>) is responsible for <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong> reduction in a warfarin-resistant manner. Knocking out <strong class=\"highlight\">FSP1</strong> in HEK293 cells dramatically decreased VKR activity, while HEK293 cells overexpressing <strong class=\"highlight\">FSP1</strong> exhibited robust VKR activity that is resistant to warfarin inhibition. Inhibitor of <strong class=\"highlight\">FSP1</strong> that inhibited ubiquinone reduction and thus triggering cancer cell <strong class=\"highlight\">ferroptosis</strong>, displayed strong inhibition of VKD carboxylation. Intriguingly, dihydroorotate dehydrogenase (DHODH), another ubiquinone-associated <strong class=\"highlight\">ferroptosis</strong> suppressor protein parallel to the function of FSP15, does not support VKD carboxylation and its inhibitors have no effect on carboxylation. These findings provide new insights into selectively controlling the physiological and pathological processes involving electron transfers mediated by <strong class=\"highlight\">vitamin</strong> <strong class=\"highlight\">K</strong> and ubiquinone.",
+        "citations_preview": [
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.21203/rs.3.rs-2039668/v1",
+            "section": "discussion"
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.21203/rs.3.rs-2039668/v1",
+            "section": "diverse functions and localizations of fsp1"
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.21203/rs.3.rs-2039668/v1",
+            "section": "-(355-trimethylcyclohex-2-en-1-ylidene)malononitrile (s7)"
+          }
+        ]
+      },
+      "consensus_top_match": {
+        "error": "HTTP Error 429: Too Many Requests"
+      }
+    },
+    {
+      "query": "Liang 2023 Ferroptosis surveillance MBOAT1 MBOAT2 phospholipid remodeling Cell",
+      "identity_confirmed": false,
+      "scite_top_match": {
+        "title": "ALDOA\u2010Mediated Metabolic Reprogramming is a Targetable Vulnerability for <strong class=\"highlight\">Ferroptosis</strong> Sensitization in Cancer",
+        "authors": [
+          "Pengqi Wang",
+          "Kezhang He",
+          "Wei Xun Zhou",
+          "Ying Zhang",
+          "Tianhua Ma",
+          "Sheng Ding"
+        ],
+        "year": 2025,
+        "journal": "Advanced Science",
+        "volume": "13",
+        "page": null,
+        "doi": "10.1002/advs.202511880",
+        "tally": {
+          "total": 1,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 1,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 1
+        },
+        "citation_counts": {
+          "total": 1,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 1,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 1
+        },
+        "editorial_notices": [],
+        "is_oa": true,
+        "abstract": "Abstract\n                  <strong class=\"highlight\">Ferroptosis</strong> presents great potential for cancer therapy, either alone or in combination with classical therapy. However, inducing <strong class=\"highlight\">ferroptosis</strong> by targeting canonical <strong class=\"highlight\">ferroptosis</strong> suppressors that directly inhibit lipid peroxidation non\u2010selectively induces <strong class=\"highlight\">ferroptosis</strong> in both cancerous and normal <strong class=\"highlight\">cells</strong>, thereby limiting its therapeutic potential. In this study, it is revealed that aldolase A (ALDOA) reprograms lipid metabolism to resist <strong class=\"highlight\">ferroptosis</strong> in cancer <strong class=\"highlight\">cells</strong> and identifies ALDOA as a targetable vulnerability for <strong class=\"highlight\">ferroptosis</strong> sensitization. Cancer <strong class=\"highlight\">cells</strong> with ALDOA suppression exhibit increased susceptibility to <strong class=\"highlight\">ferroptosis</strong>\u2014a response less obvious in normal <strong class=\"highlight\">cells</strong>. Mechanistically, ALDOA depletion induces significant accumulation of fructose 1,6\u2010bisphosphate in cancer <strong class=\"highlight\">cells</strong>, thereby enhancing autophagy\u2010dependent degradation of <strong class=\"highlight\">phospholipid</strong>\u2010modifying enzymes. These alterations increase the ratio of <strong class=\"highlight\">phospholipids</strong> containing pro\u2010ferroptotic polyunsaturated fatty acids over anti\u2010ferroptotic monounsaturated fatty acids, culminating in heightened <strong class=\"highlight\">ferroptosis</strong> sensitivity. Moreover, ALDOA inhibitors selectively promote <strong class=\"highlight\">ferroptosis</strong> in cancer <strong class=\"highlight\">cells</strong>, both in vitro and in vivo. Collectively, the findings reveal that ALDOA\u2010mediated metabolic reprogramming is a targetable vulnerability for <strong class=\"highlight\">ferroptosis</strong> sensitization in cancer.",
+        "citations_preview": [
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.1002/advs.202511880",
+            "section": "aldoa depletion-induced metabolic reprogramming modulates ph..."
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.1002/advs.202511880",
+            "section": "results"
+          }
+        ]
+      },
+      "consensus_top_match": {
+        "error": "HTTP Error 429: Too Many Requests"
+      }
+    },
+    {
+      "query": "Riegman 2020 Ferroptosis propagates across cells wave-like manner Nature Cell Biology",
+      "identity_confirmed": false,
+      "scite_top_match": {
+        "title": "Do photosynthetic <strong class=\"highlight\">cells</strong> communicate with each other during <strong class=\"highlight\">cell</strong> death? From cyanobacteria to vascular plants",
+        "authors": [
+          "Anabella Aguilera",
+          "Ayel\u00e9n Mariana Dist\u00e9fano",
+          "C\u00e9cile Jauzein",
+          "Natalia Correa\u2010Aragunde",
+          "Dana E. Mart\u00ednez",
+          "Mar\u00eda Victoria Martin",
+          "Daniela J. Sueldo"
+        ],
+        "year": 2022,
+        "journal": "Journal of Experimental Botany",
+        "volume": "73",
+        "page": "7219-7242",
+        "doi": "10.1093/jxb/erac363",
+        "tally": {
+          "total": 6,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 6,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 16
+        },
+        "citation_counts": {
+          "total": 6,
+          "supporting": 0,
+          "contradicting": 0,
+          "mentioning": 6,
+          "unclassified": 0,
+          "doi": null,
+          "citingPublications": 16
+        },
+        "editorial_notices": [],
+        "is_oa": true,
+        "abstract": "Abstract\n               As in metazoans, life in oxygenic photosynthetic organisms relies on the accurate regulation of <strong class=\"highlight\">cell</strong> death. During development and in response to the environment, photosynthetic <strong class=\"highlight\">cells</strong> activate and execute <strong class=\"highlight\">cell</strong> death pathways that culminate in the death of a specific group of <strong class=\"highlight\">cells</strong>, a process known as regulated <strong class=\"highlight\">cell</strong> death (RCD). RCD control is instrumental, as its mis regulation can lead to growth penalties and even the death of the entire organism. Intracellular molecules released during <strong class=\"highlight\">cell</strong> demise may act as \u201csurvival\u201d or \u201cdeath\u201d signals and control the <strong class=\"highlight\">propagation</strong> of <strong class=\"highlight\">cell</strong> death to surrounding <strong class=\"highlight\">cells</strong>, even in unicellular organisms. This review explores different signals involved in <strong class=\"highlight\">cell</strong>-<strong class=\"highlight\">cell</strong> communication and systemic signaling in photosynthetic organisms, in particular Ca 2+, ROS, lipid derivates, NO and eATP. We discuss their possible mode-of-action as either \u201csurvival\u201d and \u201cdeath\u201d molecules and their potential role in determining <strong class=\"highlight\">cell</strong> fate in neighboring <strong class=\"highlight\">cells</strong>. By comparing the knowledge available <strong class=\"highlight\">across</strong> the taxonomic spectrum of this coherent phylogenetic group, from cyanobacteria to vascular plants, we aim at contributing to the identification of conserved mechanisms that control <strong class=\"highlight\">cell</strong> death <strong class=\"highlight\">propagation</strong> in oxygenic photosynthetic organisms.",
+        "citations_preview": [
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.1093/jxb/erac363",
+            "section": "introduction"
+          },
+          {
+            "snippet": "",
+            "classification": "mentioning",
+            "source_doi": "10.1093/jxb/erac363",
+            "section": "introduction"
+          }
+        ]
+      },
+      "consensus_top_match": {
+        "error": "HTTP Error 429: Too Many Requests"
+      }
+    }
+  ]
+}

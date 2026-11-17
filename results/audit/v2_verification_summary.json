@@ -1,0 +1,94 @@
+{
+  "status": "ALL_CLEAN",
+  "remaining_critical": 0,
+  "remaining_major": 0,
+  "checks_passed": 7,
+  "checks_total": 7,
+  "checks": [
+    {
+      "id": "V2-P1-LOADER-CLEAN",
+      "pillar": 1,
+      "title": "Zero silent ACH-000873 fallback, real MS proteomics masks only, and stratified shard sampling",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "no_silent_fallback": true,
+        "real_ms_prot_models": 1234,
+        "loaded_records": 149999
+      }
+    },
+    {
+      "id": "V2-P2-ZERO-SHORTCUT-AND-DISJOINT-SPLITS",
+      "pillar": 2,
+      "title": "100% SMILES-only compound featurization & zero SMILES/model_id overlap across OOD splits",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "smiles_only_signature": true,
+        "zero_scalar_shortcuts_in_pharmaco": true,
+        "split1_smiles_overlap": 0,
+        "split5_smiles_overlap": 0
+      }
+    },
+    {
+      "id": "V2-P3-DECONFOUNDED-STAGE0",
+      "pillar": 3,
+      "title": "V2 checkpoints SHA-256 locked & Stage-0 evaluated with zero treatment-arm circularity or mRNA tautology",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "v2_checkpoints_verified": 6,
+        "stage0_rows": 8,
+        "no_circular_arms": true
+      }
+    },
+    {
+      "id": "V2-P4-MATH-AND-GRADIENTS",
+      "pillar": 4,
+      "title": "Zero dead branches, 15% MGM masking, exact 0 uM decoding, cone+nullspace residual <1e-4, and <2% stiff ODE error",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "flux_proposal_net_grad_norm": 10.094213,
+        "other_17_rcd_grad_norm": 0.0,
+        "decoded_zero_dose_um": 0.0,
+        "ode_12step_vs_120step_rel_err": 0.0,
+        "max_sv_residual": 8.808308323991678e-15
+      }
+    },
+    {
+      "id": "V2-P5-STATISTICS-AND-ABLATIONS",
+      "pillar": 5,
+      "title": "100% matched n_test across FerroFlux-FM v2 & 6 baselines, p >= 1/(B+1) > 0, BH-FDR q-values, and retrained ablations",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "matched_n_test": true,
+        "all_p_gt_zero": true,
+        "retrained_ablations": true
+      }
+    },
+    {
+      "id": "V2-P6-BIOPHYSICS-AND-CONE",
+      "pillar": 6,
+      "title": "Iron-free (<12 nm) PEG-silica C' dot scavenges ambient Fe3+ & irreversible reactions stay non-negative",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "iron_free_cdot_increases_lyso_fe2": true,
+        "min_irreversible_flux": 0.0009114
+      }
+    },
+    {
+      "id": "V2-P7-HONEST-FIGURES",
+      "pillar": 7,
+      "title": "All 6 figures freshly rendered from V2 tables with dynamic on-disk Parquet counts (734,267 rows) & real ||S v||_2",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "no_hardcoded_95e7": true,
+        "figures_newer_than_tables": true
+      }
+    }
+  ]
+}

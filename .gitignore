@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / testing caches
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Model weight checkpoints (tracked via SHA-256 manifests in configs/)
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Large processed Parquet shards & Stage-0 blind lockbox raw files
+data/raw/
+data/stage0_blind_lockbox/
+data/processed/*.parquet
+!data/processed/gene_vocab.json
+
+# Runtime & SLURM job logs / staging outputs
+*.log
+*.out
+*.err
+results/logs/
+results/v3_slurm_stage/
+slurm/*.out
+slurm/*.err
+
+# OS / Editor files
+.DS_Store
+*.swp
+*~

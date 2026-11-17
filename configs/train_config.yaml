@@ -1,0 +1,154 @@
+# FerroFlux-FM: Unified Pretraining, Curriculum, License-Track & Ablation Configuration
+# Strictly enforces:
+#   - Tier-3 Bradbury/Overholtzer/Wiesner zero-leakage holdout quarantine
+#   - AlphaGenome 2 Terms-of-Service lock (inference-only eval(), never during train())
+#   - Dual weight-release tracks: 'open' (Apache-2.0) vs 'academic' (CC-BY-NC-4.0)
+
+project:
+  name: "FerroFlux-FM"
+  version: "0.1.0"
+  root_dir: "/anvil/projects/x-cis261485/Ferroptosis_ML"
+  data_processed_dir: "/anvil/projects/x-cis261485/Ferroptosis_ML/data/processed"
+  configs_dir: "/anvil/projects/x-cis261485/Ferroptosis_ML/configs"
+  scratch_staging_dir: "/anvil/scratch/x-mpourbaghima/ferroflux_staging"
+  max_data_files_guard: 500
+
+security:
+  exclude_accessions_file: "/anvil/projects/x-cis261485/Ferroptosis_ML/configs/exclude_accessions.txt"
+  exclude_pmcids_file: "/anvil/projects/x-cis261485/Ferroptosis_ML/configs/exclude_pmcids.txt"
+  frozen_checkpoints_manifest: "/anvil/projects/x-cis261485/Ferroptosis_ML/configs/frozen_checkpoints_sha256.json"
+  alphagenome2_inference_only: true
+  default_license_track: "open"  # options: ["open", "academic"]
+
+stoichiometry_and_loci:
+  ferro_gem_json: "/anvil/projects/x-cis261485/Ferroptosis_ML/configs/ferro_gem_94rxn.json"
+  cis_reg_loci_tsv: "/anvil/projects/x-cis261485/Ferroptosis_ML/configs/cis_reg_64loci_hg38.tsv"
+  gene_vocab_json: "/anvil/projects/x-cis261485/Ferroptosis_ML/data/processed/gene_vocab.json"
+  num_reactions: 94
+  num_cis_reg_loci: 64
+  ag2_window_bp: 1048576
+
+model_variants:
+  # FerroFlux-FM v3 SOTA Mechanistic Grey-Box Variant (Stage 0.5 SAR + APHYNITY + 4-Corner Epistasis)
+  v3:
+    d_model: 384
+    n_layers: 6
+    n_heads: 6
+    d_ff: 1536
+    n_modules: 128
+    dropout: 0.10
+    chem_fp_dim: 3239
+    chem_desc_dim: 24
+    epigenomic_dim: 8
+    np_phys_dim: 5
+    num_hazards: 5  # [H_ferro, H_apop, H_necro, H_cupro, H_disulf]
+
+  # Rapid local / 128-core EPYC / single-GPU verification & ablation variant (~18M params)
+  base:
+    d_model: 384
+    n_layers: 8
+    n_heads: 6
+    d_ff: 1536
+    n_modules: 128
+    dropout: 0.10
+    chem_fp_dim: 3239
+    chem_desc_dim: 24
+    epigenomic_dim: 8
+    np_phys_dim: 5
+    num_hazards: 5  # [H_ferro, H_apop, H_necro, H_cupro, H_disulf]
+
+  # Full H100 SXM multi-GPU Nature/Science production checkpoint (~85M params)
+  xl:
+    d_model: 1024
+    n_layers: 16
+    n_heads: 16
+    d_ff: 4096
+    n_modules: 128
+    dropout: 0.10
+    chem_fp_dim: 3239
+    chem_desc_dim: 24
+    epigenomic_dim: 8
+    np_phys_dim: 5
+    num_hazards: 5
+
+biophysics:
+  enforce_zero_skip_to_h_ferro: true
+  nullspace_svd_rtol: 1.0e-12
+  sec46_gate:
+    require_pstk_sepsecs: true
+    require_mevalonate_ipp: true
+  sterol_7dhc_axis:
+    k0_basal_clearance: 0.10
+    bmax_radical_trapping: 2.50
+  spatial_reaction_diffusion:
+    default_diffusion_um2_s: 18.0
+    rollout_steps: 12
+    dt_seconds: 30.0
+
+curriculum:
+  ensemble_seeds: [101, 202, 303, 404, 505]
+  active_variant: "v3"
+  mixed_precision: "bf16"
+  grad_clip_norm: 1.0
+  weight_decay: 0.01
+
+  stage1_multiomics_stoichiometry:
+    epochs: 5
+    batch_size: 64
+    lr: 3.0e-4
+    loss_weights:
+      masked_gene_expr: 1.0
+      proteomics_sec46_consistency: 1.0
+      lipidomics_sterol_balance: 1.5
+      stoichiometric_flux_reg: 0.1
+
+  stage2_crispr_survivorship_deconvolution:
+    epochs: 5
+    batch_size: 64
+    lr: 2.0e-4
+    loss_weights:
+      crispr_chronos_lethality: 1.0
+      ipw_survivorship_hazard: 1.0
+      transcriptional_perturbation: 0.8
+      sterol_opposing_sign_prior: 1.0
+
+  stage3_chemical_perturbation_and_competing_risks:
+    epochs: 8
+    batch_size: 64
+    lr: 1.5e-4
+    loss_weights:
+      viability_dose_response: 1.0
+      competing_death_hazards: 1.5
+      rta_chelator_rescue_delta: 2.0
+      synergy_bliss_loewe: 1.0
+
+  stage4_physical_anchors_3d_and_spatial_waves:
+    epochs: 4
+    batch_size: 32
+    lr: 5.0e-5
+    loss_weights:
+      lysosomal_ph_fenton_anchor: 1.5
+      organoid_3d_transfer: 1.2
+      spatial_wave_morans_i: 1.0
+      calibrated_uncertainty_nll: 0.5
+
+ood_evaluation:
+  splits:
+    - "scaffold_split"
+    - "lineage_split"
+    - "organoid_2d_to_3d_split"
+    - "crispr_fin_epistasis_split"
+  held_out_lineages:
+    - "Kidney"
+    - "Melanoma"
+  calibration_bins: 15
+
+ablations:
+  ablate_sar_pretrain: false
+  ablate_aphynity_residual: false
+  ablate_diff_ferro_gem: false
+  ablate_sec46_gate: false
+  ablate_survivorship: false
+  ablate_chem_prior: false
+  ablate_physical_anchors: false
+  ablate_cis_reg_slot: false

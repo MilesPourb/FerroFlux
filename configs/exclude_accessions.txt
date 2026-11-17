@@ -1,0 +1,10 @@
+# Tier-3 Quarantined Bradbury / Overholtzer / Wiesner Omics & Imaging Holdouts
+# ZERO bytes from these 7 datasets (8 identifier forms) may enter any ETL or training split.
+GSE319397
+GSE319419
+GSE310954
+10.5281/zenodo.18271042
+18271042
+GSE196336
+GSE20286
+GSE20285

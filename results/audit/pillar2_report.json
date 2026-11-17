@@ -1,0 +1,120 @@
+{
+  "pillar": 2,
+  "name": "Train/Test Contamination, Shortcut Leaks & True Out-of-Sample Benchmark",
+  "findings": [
+    {
+      "id": "P2-FULL-DATASET-LEAK",
+      "severity": "CRITICAL",
+      "title": "train_curriculum.py pretrained all V1 BASE and XL checkpoints on 100% of FerroFluxMultimodalDataset (zero OOD test holdout)",
+      "details": {
+        "confirmed_in_source": true,
+        "dataset_records_loaded_open": 122139,
+        "impact": "100% of test indices in ood_benchmark_summary.csv were included in the 22-epoch pretraining loop of BASE and XL checkpoints."
+      }
+    },
+    {
+      "id": "P2-SCAFFOLD-SHORTCUT-AND-SIMILARITY",
+      "severity": "CRITICAL",
+      "title": "Scaffold split SMILES disjointness, Tanimoto nearest-neighbor similarity, and probe_mechanism shortcut rate",
+      "details": {
+        "n_train_unique_smiles": 379,
+        "n_test_unique_smiles": 107,
+        "exact_smiles_overlap_count": 0,
+        "median_max_tanimoto_to_train": 0.268,
+        "max_tanimoto_to_train": 1.0,
+        "test_pharmaco_rows": 17092,
+        "test_pharmaco_rows_leaking_probe_mechanism": 17092,
+        "frac_leaking_probe_mechanism": 1.0
+      }
+    },
+    {
+      "id": "P2-LINEAGE-MODEL-OVERLAP",
+      "severity": "VERIFIED-CLEAN",
+      "title": "Lineage split cell/patient model_id overlap across all 9 modality buckets",
+      "details": {
+        "n_train_models": 2502,
+        "n_test_models": 662,
+        "overlapping_model_ids_count": 0,
+        "sample_overlapping_ids": []
+      }
+    },
+    {
+      "id": "P2-SPLIT6-SFTI-LABEL-AND-DOSE0-CONFOUND",
+      "severity": "CRITICAL",
+      "title": "Split 6 mixes unperturbed dose=0 normal_sfti rows (hardcoded viability=1.0) with dosed tumor pharmaco rows AND passes is_normal_organ_or_til at test time",
+      "details": {
+        "n_test_normal_sfti_rows_dose0_viab1": 206,
+        "n_test_tumor_pharmaco_rows_dosed": 1589,
+        "trivial_dose0_baseline_exploit": "Any model predicting 1.0 when dose_a == 0 and <1.0 when dose_a > 0 achieves high AUROC without learning tissue selectivity."
+      }
+    },
+    {
+      "id": "P2-TRUE-OOS-GAP",
+      "severity": "CRITICAL",
+      "title": "Measured inflation gap between V1 in-sample/shortcut OOD table vs strictly out-of-sample shortcut-stripped V1 model",
+      "details": [
+        {
+          "ood_split": "1_leave_out_scaffold",
+          "eval_target": "viability_dosed_only",
+          "n_eval": 512,
+          "reported_v1_leaked_xl_rho": 0.5818,
+          "true_v1_oos_no_shortcut_rho": 0.2158,
+          "inflation_delta_rho": 0.366,
+          "reported_v1_leaked_xl_auroc": 0.8094,
+          "true_v1_oos_no_shortcut_auroc": 0.6117
+        },
+        {
+          "ood_split": "2_leave_out_lineage_ccrcc_melanoma",
+          "eval_target": "viability_dosed_only",
+          "n_eval": 504,
+          "reported_v1_leaked_xl_rho": 0.4959,
+          "true_v1_oos_no_shortcut_rho": 0.2815,
+          "inflation_delta_rho": 0.2144,
+          "reported_v1_leaked_xl_auroc": 0.7597,
+          "true_v1_oos_no_shortcut_auroc": 0.6392
+        },
+        {
+          "ood_split": "3_2d_to_3d_organoid_pdx",
+          "eval_target": "chronos_fitness",
+          "n_eval": 512,
+          "reported_v1_leaked_xl_rho": 0.0211,
+          "true_v1_oos_no_shortcut_rho": -0.0566,
+          "inflation_delta_rho": 0.0777,
+          "reported_v1_leaked_xl_auroc": 0.5034,
+          "true_v1_oos_no_shortcut_auroc": 0.474
+        },
+        {
+          "ood_split": "4_dual_crispr_fin_epistasis",
+          "eval_target": "chronos_fitness",
+          "n_eval": 512,
+          "reported_v1_leaked_xl_rho": 0.2611,
+          "true_v1_oos_no_shortcut_rho": -0.0542,
+          "inflation_delta_rho": 0.3153,
+          "reported_v1_leaked_xl_auroc": 0.5795,
+          "true_v1_oos_no_shortcut_auroc": 0.495
+        },
+        {
+          "ood_split": "5_cuproptosis_elesclomol_specificity",
+          "eval_target": "viability_dosed_only",
+          "n_eval": 512,
+          "reported_v1_leaked_xl_rho": 0.598,
+          "true_v1_oos_no_shortcut_rho": -0.6007,
+          "inflation_delta_rho": 1.1987,
+          "reported_v1_leaked_xl_auroc": 0.8037,
+          "true_v1_oos_no_shortcut_auroc": 0.1975
+        },
+        {
+          "ood_split": "6_sfti_tumor_vs_normal_til",
+          "eval_target": "viability_dosed_only",
+          "n_eval": 384,
+          "reported_v1_leaked_xl_rho": 0.7173,
+          "true_v1_oos_no_shortcut_rho": 0.3221,
+          "inflation_delta_rho": 0.3952,
+          "reported_v1_leaked_xl_auroc": 0.8439,
+          "true_v1_oos_no_shortcut_auroc": 0.6558
+        }
+      ]
+    }
+  ],
+  "peak_rss_mb": 3089.98
+}

@@ -1,0 +1,58 @@
+{
+  "pillar": 7,
+  "name": "Figure-to-Table Truthfulness, Hardcoded Constants & Claim Forensics",
+  "findings": [
+    {
+      "id": "P7-FIG1B-HARDCODED-COUNTS",
+      "severity": "CRITICAL",
+      "title": "Fig1b plots hardcoded upstream single-cell counts (9.5e7, 8.2e6) labeled 'Harmonized Perturbation / Cell Profiles' instead of the 734,267 rows on disk",
+      "details": {
+        "hardcoded_open_sum": 105878000,
+        "actual_parquet_rows_on_disk": 734267,
+        "per_shard_rows": {
+          "cells_basal_multiomics.parquet": 2454,
+          "chem_ferrdb_qhts_chembl_features.parquet": 53984,
+          "cis_reg_64loci_epigenomics.parquet": 936,
+          "clinical_icb_cohorts.parquet": 502,
+          "crispr_chronos_2d_3d.parquet": 200617,
+          "cysdb_abpp_ligandability.parquet": 41474,
+          "drugcomb_synergy_blocks.parquet": 224028,
+          "normal_organ_til_baselines.parquet": 206,
+          "perturb_transcriptomes.parquet": 13517,
+          "perturbed_oxylipidomics_sterolomics.parquet": 101341,
+          "pharmacogenomic_viability.parquet": 91800,
+          "physical_anchors_metabolomics_lipidomics.parquet": 928,
+          "physical_anchors_proteomics.parquet": 1525,
+          "pmc_oa_rescue_and_bionano.parquet": 955
+        }
+      }
+    },
+    {
+      "id": "P7-FIG3D-VACUOUS-RESIDUAL",
+      "severity": "MAJOR",
+      "title": "Fig3d checks 'if mass_balance_residual in ol' which FerroFluxFM.forward() never emits, printing vacuous 0.00e+00 fallback",
+      "details": {
+        "emitted_by_model": false,
+        "printed_fallback": 0.0
+      }
+    },
+    {
+      "id": "P7-STALE-FIGURES-VS-TABLES",
+      "severity": "MAJOR",
+      "title": "Fig1-Fig6 on disk predate Saturday's FerroFlux-FM-XL OOD/Ablation CSV updates (figures show Friday BASE numbers while CSVs show Saturday XL numbers)",
+      "details": {
+        "ood_csv_mtime": 1794713350.190913,
+        "fig2_png_mtime": 1794621161.124775
+      }
+    },
+    {
+      "id": "P7-SYNTHETIC-PLOT-FALLBACKS",
+      "severity": "MINOR",
+      "title": "generate_nature_figures.py contains synthetic fallback DataFrames when CSVs are missing (should raise FileNotFoundError in production)",
+      "details": {
+        "has_synthetic_fallback_code": true
+      }
+    }
+  ],
+  "peak_rss_mb": 10578.86
+}

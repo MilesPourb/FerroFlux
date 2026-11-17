@@ -1,0 +1,197 @@
+{
+  "pillar": 1,
+  "name": "Data Provenance, Mis-Joins, Truncation & Vocabulary Alignment",
+  "total_shards": 14,
+  "total_rows_on_disk": 734267,
+  "quarantine_leaks_found": 0,
+  "findings": [
+    {
+      "id": "P1-VOCAB-IDX",
+      "severity": "MINOR",
+      "title": "Hardcoded DEFAULT_ANCHOR_28_VOCAB_IDX & FDX1_VOCAB_IDX match current gene_vocab.json, but fragile if vocab changes",
+      "details": {
+        "n_checked": 29,
+        "mismatches": 0
+      }
+    },
+    {
+      "id": "P1-PROT-PROXY",
+      "severity": "MAJOR",
+      "title": "Stage-1 basal records without MS proteomics substitute raw mRNA expression as prot_anchor_target",
+      "details": {
+        "basal_models_total": 2454,
+        "basal_with_real_ms_proteomics": 777,
+        "basal_falling_back_to_mrna_proxy": 1677,
+        "frac_mrna_proxy": 0.6834
+      }
+    },
+    {
+      "id": "P1-SILENT-MID-FALLBACK",
+      "severity": "CRITICAL",
+      "title": "Silent fallback assigns unmatched rows in 6 shards to ACH-000873 basal transcriptome",
+      "details": {
+        "crispr_chronos_2d_3d.parquet": {
+          "total_rows": 200617,
+          "matched_to_basal_expr": 189792,
+          "unmatched_falling_back_to_first_cell": 10825,
+          "fallback_cell_id": "ACH-000873",
+          "match_rate": 0.946,
+          "recoverable_via_cell_line_name": 0
+        },
+        "drugcomb_synergy_blocks.parquet": {
+          "total_rows": 224028,
+          "matched_to_basal_expr": 160443,
+          "unmatched_falling_back_to_first_cell": 63585,
+          "fallback_cell_id": "ACH-000873",
+          "match_rate": 0.7162,
+          "recoverable_via_cell_line_name": 0
+        },
+        "perturb_transcriptomes.parquet": {
+          "total_rows": 13517,
+          "matched_to_basal_expr": 12938,
+          "unmatched_falling_back_to_first_cell": 579,
+          "fallback_cell_id": "ACH-000873",
+          "match_rate": 0.9572,
+          "recoverable_via_cell_line_name": 0
+        },
+        "perturbed_oxylipidomics_sterolomics.parquet": {
+          "total_rows": 101341,
+          "matched_to_basal_expr": 49289,
+          "unmatched_falling_back_to_first_cell": 52052,
+          "fallback_cell_id": "ACH-000873",
+          "match_rate": 0.4864,
+          "recoverable_via_cell_line_name": 0
+        },
+        "pharmacogenomic_viability.parquet": {
+          "total_rows": 91800,
+          "matched_to_basal_expr": 88361,
+          "unmatched_falling_back_to_first_cell": 3439,
+          "fallback_cell_id": "ACH-000873",
+          "match_rate": 0.9625,
+          "recoverable_via_cell_line_name": 0
+        },
+        "pmc_oa_rescue_and_bionano.parquet": {
+          "total_rows": 955,
+          "matched_to_basal_expr": 341,
+          "unmatched_falling_back_to_first_cell": 614,
+          "fallback_cell_id": "ACH-000873",
+          "match_rate": 0.3571,
+          "recoverable_via_cell_line_name": 0
+        }
+      }
+    },
+    {
+      "id": "P1-UNSHUFFLED-TRUNCATION",
+      "severity": "CRITICAL",
+      "title": "Unshuffled .iloc[:cap] prefix truncation drops entire downstream data sources sorted at the end of Parquet shards",
+      "details": {
+        "crispr_chronos_2d_3d.parquet": {
+          "total_rows": 200617,
+          "cap": 45000,
+          "fraction_kept": 0.2243,
+          "full_source_counts": {
+            "DepMap_24Q4_Chronos": 171734,
+            "Sanger_Organoids_20260723": 22032,
+            "BioGRID_ORCS_v2.0.18": 4997,
+            "DepMap_NextGen_3D_Minipool": 1854
+          },
+          "kept_prefix_source_counts": {
+            "DepMap_24Q4_Chronos": 45000
+          },
+          "completely_dropped_sources": [
+            "BioGRID_ORCS_v2.0.18",
+            "DepMap_NextGen_3D_Minipool",
+            "Sanger_Organoids_20260723"
+          ]
+        },
+        "drugcomb_synergy_blocks.parquet": {
+          "total_rows": 224028,
+          "cap": 15000,
+          "fraction_kept": 0.067,
+          "full_source_counts": {
+            "DrugComb_v1.5": 224028
+          },
+          "kept_prefix_source_counts": {
+            "DrugComb_v1.5": 15000
+          },
+          "completely_dropped_sources": []
+        },
+        "perturbed_oxylipidomics_sterolomics.parquet": {
+          "total_rows": 101341,
+          "cap": 5000,
+          "fraction_kept": 0.0493,
+          "full_source_counts": {
+            "MetaboLights_MTBLS8280": 44532,
+            "MetaboLights_MTBLS15364": 21387,
+            "MetaboLights_MTBLS1399": 9972,
+            "MetabolomicsWorkbench_ST004203": 7510,
+            "MetabolomicsWorkbench_ST001334": 6557,
+            "MetaboLights_MTBLS774": 5033,
+            "MetabolomicsWorkbench_ST003260": 2242,
+            "MetabolomicsWorkbench_ST002115": 1092,
+            "MetabolomicsWorkbench_ST003261": 881,
+            "MetabolomicsWorkbench_ST004462": 793,
+            "MetabolomicsWorkbench_ST001339": 680,
+            "Zenodo_20706003_Polyamines_Fe2": 490,
+            "MetabolomicsWorkbench_ST003898": 120,
+            "MetabolomicsWorkbench_ST004225": 52
+          },
+          "kept_prefix_source_counts": {
+            "MetaboLights_MTBLS1399": 3061,
+            "MetaboLights_MTBLS15364": 1141,
+            "MetaboLights_MTBLS8280": 449,
+            "MetabolomicsWorkbench_ST001339": 140,
+            "MetabolomicsWorkbench_ST004203": 69,
+            "MetabolomicsWorkbench_ST004225": 52,
+            "MetabolomicsWorkbench_ST002115": 48,
+            "MetabolomicsWorkbench_ST003898": 40
+          },
+          "completely_dropped_sources": [
+            "MetaboLights_MTBLS774",
+            "MetabolomicsWorkbench_ST001334",
+            "MetabolomicsWorkbench_ST003260",
+            "MetabolomicsWorkbench_ST003261",
+            "MetabolomicsWorkbench_ST004462",
+            "Zenodo_20706003_Polyamines_Fe2"
+          ]
+        },
+        "pharmacogenomic_viability.parquet": {
+          "total_rows": 91800,
+          "cap": 45000,
+          "fraction_kept": 0.4902,
+          "full_source_counts": {
+            "CTRPv2": 32028,
+            "PRISM_24Q2_Primary": 26906,
+            "PRISM_19Q4_Secondary": 16120,
+            "GDSC2_v8.5": 13149,
+            "BeatAML_v4": 3597
+          },
+          "kept_prefix_source_counts": {
+            "CTRPv2": 32028,
+            "PRISM_19Q4_Secondary": 12972
+          },
+          "completely_dropped_sources": [
+            "BeatAML_v4",
+            "GDSC2_v8.5",
+            "PRISM_24Q2_Primary"
+          ]
+        }
+      }
+    },
+    {
+      "id": "P1-LICENSE-AUDIT",
+      "severity": "MINOR",
+      "title": "Pharmacogenomic source x license_track distribution audited (DepMap PRISM CC-BY-4.0, GDSC non-commercial terms noted)",
+      "details": {
+        "open": {
+          "BeatAML_v4": 3597,
+          "CTRPv2": 32028,
+          "GDSC2_v8.5": 13149,
+          "PRISM_19Q4_Secondary": 16120,
+          "PRISM_24Q2_Primary": 26906
+        }
+      }
+    }
+  ],
+  "peak_rss_mb": 1783.95
+}
