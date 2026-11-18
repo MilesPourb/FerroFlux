@@ -104,15 +104,15 @@ class DiffFerroGEM(nn.Module):
         self.standalone_m_head = nn.Linear(self.d_model, len(ANCHOR_12_METABOLITES))
 
         # APHYNITY Grey-Box Bilinear Drug x Cell x Multi-Omic Multiplicative Residual (zero-initialized!)
-        d_inter = max(64, min(192, self.d_model))
-        cell_inter_in = self.d_model + len(ANCHOR_28_PROTEINS) + len(ANCHOR_12_METABOLITES) + EXTRA_CELL_CTX_DIM
+        d_inter = max(96, min(256, self.d_model))
+        cell_inter_in = self.d_model + len(ANCHOR_28_PROTEINS) + len(ANCHOR_12_METABOLITES) + EXTRA_CELL_CTX_DIM + 128
         self.aphynity_cell_proj = nn.Sequential(
             nn.Linear(cell_inter_in, d_inter),
             nn.LayerNorm(d_inter),
             nn.SiLU(),
         )
         self.aphynity_chem_proj = nn.Sequential(
-            nn.Linear(self.d_chem_latent, d_inter),
+            nn.Linear(self.d_chem_latent + 14, d_inter),
             nn.LayerNorm(d_inter),
             nn.SiLU(),
         )
@@ -120,13 +120,16 @@ class DiffFerroGEM(nn.Module):
             nn.Linear(d_inter * 3, d_inter),
             nn.LayerNorm(d_inter),
             nn.SiLU(),
-            nn.Linear(d_inter, 1),
+            nn.Linear(d_inter, d_inter // 2),
+            nn.SiLU(),
+            nn.Linear(d_inter // 2, 1),
         )
         nn.init.zeros_(self.aphynity_residual_net[-1].weight)
         nn.init.zeros_(self.aphynity_residual_net[-1].bias)
 
         # Strictly positive learnable biophysical rate constants (softplus-parameterized)
         self.raw_k_xc = nn.Parameter(torch.tensor(0.35))
+        self.raw_k_txnrd1 = nn.Parameter(torch.tensor(-0.35))
         self.raw_k_tfrc = nn.Parameter(torch.tensor(-0.20))
         self.raw_k_ncoa4 = nn.Parameter(torch.tensor(-0.45))
         self.raw_k_fth1 = nn.Parameter(torch.tensor(-0.10))
@@ -231,6 +234,7 @@ class DiffFerroGEM(nn.Module):
         pert_effects: dict[str, torch.Tensor] | None = None,
         dt: torch.Tensor | float | None = None,
         extra_cell_ctx: torch.Tensor | None = None,
+        gene_expr_ctx: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         """Compute cone-projected nullspace fluxes, radical-chain peroxidation, and APHYNITY residual."""
         self._maybe_refresh_gem()
@@ -305,7 +309,7 @@ class DiffFerroGEM(nn.Module):
         raw_flux = self.flux_proposal_net(flux_in)
         irrev_m = self.irrev_mask.unsqueeze(0)
         u_dr = torch.where(irrev_m > 0.5, F.softplus(raw_flux.double()), raw_flux.double())
-        for _ in range(max(48, self.n_cone_iters)):
+        for _ in range(max(24, self.n_cone_iters)):
             x_sub = torch.matmul(u_dr, self.P_null)
             r_sub = 2.0 * x_sub - u_dr
             x_cone = torch.where(irrev_m > 0.5, F.relu(r_sub), r_sub)
@@ -316,6 +320,7 @@ class DiffFerroGEM(nn.Module):
 
         v_xc_ss = self._rxn_flux(fluxes, "v_SLC7A11", 0)
         v_gsh_ss = 0.5 * (self._rxn_flux(fluxes, "v_GCLC", 5) + self._rxn_flux(fluxes, "v_GSS", 6))
+        v_txn_ss = 0.5 * (self._rxn_flux(fluxes, "v_TXNRD1", 10) + self._rxn_flux(fluxes, "v_GSR", 7))
         v_nadph_ss = 0.5 * (self._rxn_flux(fluxes, "v_G6PD", 8) + self._rxn_flux(fluxes, "v_PGD", 9))
         v_ebp_ss = 0.5 * (self._rxn_flux(fluxes, "v_EBP", 31) + self._rxn_flux(fluxes, "v_SC5D", 32))
         v_dhcr7_ss = self._rxn_flux(fluxes, "v_DHCR7", 33)
@@ -354,8 +359,13 @@ class DiffFerroGEM(nn.Module):
             * p_eff[:, PROTEIN_TO_IDX["GSS"]]
             / (0.4 + p_eff[:, PROTEIN_TO_IDX["GCLC"]] + 0.15 * v_gsh_ss)
         )
+        occ_txnrd1 = target_occ[:, TARGET_TO_IDX["TXNRD1"]]
+        txnrd1_eff = ((p_eff[:, PROTEIN_TO_IDX["TXNRD1"]] + 0.12 * v_txn_ss) * (1.0 - 0.96 * occ_txnrd1)).clamp(min=1e-5)
+        gsr_factor = 0.45 + 0.55 * p_eff[:, PROTEIN_TO_IDX["GSR"]] / (0.50 + p_eff[:, PROTEIN_TO_IDX["GSR"]])
+        txn_redox_factor = gsr_factor * (0.45 + 0.55 * txnrd1_eff / (0.35 + txnrd1_eff))
+
         gsh_level = (
-            0.20 * m0[:, METABOLITE_TO_IDX["GSH"]] * (cys2 / (0.10 + cys2)) + j_xc * gsh_synth
+            (0.20 * m0[:, METABOLITE_TO_IDX["GSH"]] * (cys2 / (0.10 + cys2)) + j_xc * gsh_synth) * txn_redox_factor
         ).clamp(min=1e-4)
 
         nadph_collapse = 1.0 + 0.8 * p_eff[:, PROTEIN_TO_IDX["SLC7A11"]] * cys2 * torch.sigmoid(4.0 * (0.30 - glc))
@@ -487,10 +497,12 @@ class DiffFerroGEM(nn.Module):
         k_branch = self._pos(self.raw_k_branch, dtype, 0.02)
         k_decay = self._pos(self.raw_k_decay, dtype, 0.02) * (0.35 + 0.65 * repair_shield_mult)
         k_gpx4_c = self._pos(self.raw_k_gpx4, dtype, 0.20)
+        k_txnrd1_c = self._pos(self.raw_k_txnrd1, dtype, 0.03)
         k_gpx4_clear = (k_gpx4_c * (e_gpx4 + 0.08 * v_gpx4_ss * (e_gpx4 / (0.2 + e_gpx4))) * gsh_level).clamp(min=1e-6)
+        k_txnrd1_clear = (k_txnrd1_c * txnrd1_eff * (nadph_level / (0.20 + nadph_level))).clamp(min=1e-6)
 
         p_ooh_base = (r_init + k_prop * pufa_pl_eff * pl_oo_rad).clamp(min=1e-7)
-        d_ooh = (k_decay + k_gpx4_clear + 0.40 * k_rta_drug + 0.30 * k_7dhc_shield).clamp(min=1e-5)
+        d_ooh = (k_decay + k_gpx4_clear + k_txnrd1_clear + 0.40 * k_rta_drug + 0.30 * k_7dhc_shield).clamp(min=1e-5)
 
         h_step = (dt_vec / float(self.n_ode_substeps)).clamp(min=0.01, max=16.0)
         exp_full = torch.exp((-d_ooh * h_step).clamp(min=-50.0, max=0.0))
@@ -516,16 +528,26 @@ class DiffFerroGEM(nn.Module):
             if extra_cell_ctx is not None
             else torch.zeros(bsz, EXTRA_CELL_CTX_DIM, device=device, dtype=dtype)
         )
-        z_cell_inter = self.aphynity_cell_proj(torch.cat([z, p_base, m0, ctx_aligned], dim=-1))
-        z_chem_inter = self.aphynity_chem_proj(z_chem_active)
+        gx_ctx = (
+            self._align_dim(gene_expr_ctx.to(device=device, dtype=dtype), 128)
+            if gene_expr_ctx is not None
+            else torch.zeros(bsz, 128, device=device, dtype=dtype)
+        )
+        z_cell_inter = self.aphynity_cell_proj(torch.cat([z, p_base, m0, ctx_aligned, gx_ctx], dim=-1))
+        z_chem_inter = self.aphynity_chem_proj(torch.cat([z_chem_active, target_occ], dim=-1))
         z_bilinear = torch.cat([z_cell_inter, z_chem_inter, z_cell_inter * z_chem_inter], dim=-1)
-        aphynity_logit = self.aphynity_residual_net(z_bilinear).squeeze(-1)
+        pert_gate = (
+            (target_occ.max(dim=-1).values > 1e-5)
+            | (z_chem_active.abs().sum(dim=-1) > 1e-6)
+            | (delta_j_lyso_fe > 1e-5)
+        ).to(dtype=dtype)
+        aphynity_logit = self.aphynity_residual_net(z_bilinear).squeeze(-1) * (0.20 + 0.80 * pert_gate)
 
         if self.ablate_aphynity_residual:
             aphynity_gain = ones_1d
             aphynity_logit = torch.zeros(bsz, device=device, dtype=dtype)
         else:
-            aphynity_gain = torch.exp(1.25 * torch.tanh(aphynity_logit))
+            aphynity_gain = torch.exp(2.0 * torch.tanh(aphynity_logit))
 
         rates = {
             "k_fenton_init": k_fenton_init,

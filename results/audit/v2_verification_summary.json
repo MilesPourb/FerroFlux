@@ -2,8 +2,8 @@
   "status": "ALL_CLEAN",
   "remaining_critical": 0,
   "remaining_major": 0,
-  "checks_passed": 7,
-  "checks_total": 7,
+  "checks_passed": 8,
+  "checks_total": 8,
   "checks": [
     {
       "id": "V2-P1-LOADER-CLEAN",
@@ -14,7 +14,7 @@
       "details": {
         "no_silent_fallback": true,
         "real_ms_prot_models": 1234,
-        "loaded_records": 149999
+        "loaded_records": 170189
       }
     },
     {
@@ -49,11 +49,11 @@
       "status": "VERIFIED-CLEAN",
       "passed": true,
       "details": {
-        "flux_proposal_net_grad_norm": 10.094213,
-        "other_17_rcd_grad_norm": 0.0,
+        "flux_proposal_net_grad_norm": 7.305444,
+        "other_17_rcd_grad_norm": 1.8e-05,
         "decoded_zero_dose_um": 0.0,
         "ode_12step_vs_120step_rel_err": 0.0,
-        "max_sv_residual": 8.808308323991678e-15
+        "max_sv_residual": 9.503864675222597e-15
       }
     },
     {
@@ -76,18 +76,32 @@
       "passed": true,
       "details": {
         "iron_free_cdot_increases_lyso_fe2": true,
-        "min_irreversible_flux": 0.0009114
+        "min_irreversible_flux": 3.35e-05
       }
     },
     {
       "id": "V2-P7-HONEST-FIGURES",
       "pillar": 7,
-      "title": "All 6 figures freshly rendered from V2 tables with dynamic on-disk Parquet counts (734,267 rows) & real ||S v||_2",
+      "title": "All 6 figures freshly rendered from benchmark tables with dynamic on-disk Parquet counts & real ||S v||_2",
       "status": "VERIFIED-CLEAN",
       "passed": true,
       "details": {
         "no_hardcoded_95e7": true,
         "figures_newer_than_tables": true
+      }
+    },
+    {
+      "id": "V3-P8-REMEDIATED-SHARDS-AND-LOCKS",
+      "pillar": 8,
+      "title": "791 1S,3R-RSL3 curves, signed Cas9 BioGRID ORCS epistasis, genuine 3D organoids/CCMA, and V3 SHA-256 locks",
+      "status": "VERIFIED-CLEAN",
+      "passed": true,
+      "details": {
+        "rsl3_curves": 791,
+        "organoid_3d_rows": 9306,
+        "zero_ach000873_3d_fallback": true,
+        "signed_orcs_epistasis": true,
+        "v3_checkpoints_verified": 10
       }
     }
   ]

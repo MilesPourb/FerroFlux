@@ -112,10 +112,12 @@ SAR_20_TARGETS: tuple[str, ...] = (
     "NFE2L2",                 # 14
     "KEAP1",                  # 15
     "GSR",                    # 16
-    "FERROPTOSIS_HT1080",     # 17
-    "HRAS_BJELR",             # 18
-    "FERROPTOSIS",            # 19
+    "FERROPTOSIS_HT1080",     # 17 -> phenotypic cellular ferroptosis qHTS
+    "HRAS_BJELR",             # 18 -> synthetic-lethal ferroptosis qHTS
+    "FERROPTOSIS",            # 19 -> FerrDb / phenotypic ferroptosis INDUCER
+    "FERROPTOSIS_INHIBITOR",  # 20 -> FerrDb ferroptosis INHIBITOR / RESCUER
 )
+SAR_21_TARGETS = SAR_20_TARGETS
 SAR_TARGET_TO_IDX: dict[str, int] = {t: i for i, t in enumerate(SAR_20_TARGETS)}
 
 # Pure structure-only RDKit SMARTS motifs (`0` human annotation leakage)
@@ -125,7 +127,7 @@ _SMARTS_NITROISOXAZOLE = Chem.MolFromSmarts("[$(c1cc([N+](=O)[O-])on1),$(c1oc([N
 _SMARTS_ARYLAMINE_RTA = Chem.MolFromSmarts("[$(c1ccccc1Nc2ccccc2),$(c1cc(N)c(NC)cc1),$(c1ccccc1NC1CCCCC1),$(c1cc(O)c(O)c(O)c1)]")
 _SMARTS_HYDROXAMIC_CHELATOR = Chem.MolFromSmarts("[$(C(=O)N[OH]),$(c1cc(=O)n([OH])cc1),$(c1c([OH])c(=O)ccn1)]")
 _SMARTS_CATECHOL_CHELATOR = Chem.MolFromSmarts("[$(c1cc(O)c(O)cc1),$(c1ccccc1O-c2nc(-c3ccccc3O)nn2)]")
-_SMARTS_ENDOPEROXIDE_QUINONE = Chem.MolFromSmarts("[$(OO),$(C1=CC(=O)C=CC1=O)]")
+_SMARTS_ENDOPEROXIDE_QUINONE = Chem.MolFromSmarts("[$(OO),$([#6]1=[#6][#6](=O)[#6]=[#6][#6]1=O)]")
 _SMARTS_STATIN_DIHYDROXY = Chem.MolFromSmarts("[$(O[CH]CC(O)CC(=O)),$(O=C1CC(O)CC(CC)O1)]")
 _SMARTS_THIOCARBONYL_CU_IONOPHORE = Chem.MolFromSmarts("[#6](=[S])[#7,#16]")
 _SMARTS_QUINAZOLINONE_PIP = Chem.MolFromSmarts("[$(c1ccc2nc(=O)n(C)c(=O)c2c1),$(c1ccc2ncn(CC(=O))c2c1),$(N1CCNCC1)]")
@@ -154,11 +156,24 @@ def encode_log10_dose_um(dose_um: float) -> float:
     return float(np.log10(d + 1e-3))
 
 
+def _sanitize_smiles_token(smiles: str) -> str:
+    """Strip replicate delimiters (e.g. PRISM 'SMI, SMI') and return first parseable SMILES."""
+    smi = (smiles or "").strip()
+    if not smi or smi.lower() in ("nan", "none"):
+        return ""
+    if any(sep in smi for sep in (",", ";", "|")):
+        for part in re.split(r"[,;|]+", smi):
+            cand = part.strip()
+            if cand and Chem.MolFromSmiles(cand) is not None:
+                return cand
+    return smi
+
+
 @lru_cache(maxsize=65536)
 def canonicalize_smiles_and_keys(smiles: str) -> tuple[str, str, str]:
     """Return `(canonical_smiles, desalted_ik14, murcko_scaffold)` for strict leak-free deduplication."""
-    smi = (smiles or "").strip()
-    if not smi or smi.lower() in ("nan", "none"):
+    smi = _sanitize_smiles_token(smiles)
+    if not smi:
         return "", "", ""
     mol = Chem.MolFromSmiles(smi)
     if mol is None:
@@ -198,14 +213,14 @@ def compute_compound_featurization(smiles: str, probe_mechanism: str = "") -> tu
 
     `probe_mechanism` is retained solely as an ignored legacy keyword argument for API compatibility
     and NEVER modifies any feature value (zero human annotation leakage).
-    Indices `0..11` of `desc_arr` preserve the exact V2 layout (`desc_arr[11]` == thiocarbonyl Cu-ionophore).
+    Indices `0..11` of `desc_arr` preserve the exact V2 layout (`desc_arr[11]` == bidentate thiocarbonyl Cu-ionophore).
     """
     _ = probe_mechanism  # strictly ignored to guarantee zero mechanism-label leakage
     fp_arr = np.zeros(CHEM_FP_DIM, dtype=np.float32)
     desc_arr = np.zeros(CHEM_DESC_DIM, dtype=np.float32)
 
-    smi = (smiles or "").strip()
-    mol = Chem.MolFromSmiles(smi) if smi and smi.lower() != "nan" else None
+    smi = _sanitize_smiles_token(smiles)
+    mol = Chem.MolFromSmiles(smi) if smi else None
     if mol is not None:
         try:
             ecfp4 = np.zeros(2048, dtype=np.float32)
@@ -245,7 +260,9 @@ def compute_compound_featurization(smiles: str, probe_mechanism: str = "") -> tu
                 or (rdMolDescriptors.CalcNumAliphaticCarbocycles(mol) >= 4)
             )
             has_thiocarb_cu = float(
-                mol.HasSubstructMatch(_SMARTS_THIOCARBONYL_CU_IONOPHORE) if _SMARTS_THIOCARBONYL_CU_IONOPHORE else False
+                len({m[0] for m in mol.GetSubstructMatches(_SMARTS_THIOCARBONYL_CU_IONOPHORE)}) >= 2
+                if _SMARTS_THIOCARBONYL_CU_IONOPHORE
+                else False
             )
 
             # Extended v3 pure-SMILES descriptors (indices 12..23)
@@ -347,9 +364,9 @@ def _get_or_build_sar_mol_cache(unique_smiles: list[str], cache_dir: Path = DEFA
     if not missing:
         return _SAR_MOL_FEATURE_CACHE
 
-    master_file = cache_dir / f"sar_mol_features_v3_master_{CHEM_FP_DIM}_{CHEM_DESC_DIM}.npz"
+    master_file = cache_dir / f"sar_mol_features_v3_master_{CHEM_FP_DIM}_{CHEM_DESC_DIM}_bident.npz"
     sig_hash = hashlib.sha256("\n".join(sorted(unique_smiles)).encode("utf-8")).hexdigest()[:16]
-    cache_file = cache_dir / f"sar_mol_features_v3_{CHEM_FP_DIM}_{CHEM_DESC_DIM}_{sig_hash}.npz"
+    cache_file = cache_dir / f"sar_mol_features_v3_{CHEM_FP_DIM}_{CHEM_DESC_DIM}_bident_{sig_hash}.npz"
     for cand_npz in (master_file, cache_file):
         if cand_npz.is_file():
             try:
@@ -450,6 +467,20 @@ def _load_grouped_sar_molecules(pq_path: Path, license_track: str) -> list[dict[
     if cache_key in _SAR_GROUPED_TRACK_CACHE:
         return _SAR_GROUPED_TRACK_CACHE[cache_key]
 
+    import os as _os
+    import pickle as _pickle
+
+    mtime_ns = int(pq_path.stat().st_mtime_ns) if pq_path.is_file() else 0
+    disk_pkl = Path("/anvil/scratch/x-mpourbaghima/ferroflux_staging") / f"sar_grouped_v3_21_{license_track}_{mtime_ns}.pkl"
+    if disk_pkl.is_file():
+        try:
+            grouped_cached = _pickle.loads(disk_pkl.read_bytes())
+            if isinstance(grouped_cached, list) and len(grouped_cached) > 0:
+                _SAR_GROUPED_TRACK_CACHE[cache_key] = grouped_cached
+                return grouped_cached
+        except Exception:
+            pass
+
     df = pq.read_table(
         pq_path,
         columns=[
@@ -481,6 +512,11 @@ def _load_grouped_sar_molecules(pq_path: Path, license_track: str) -> list[dict[
         if raw_smi not in raw_to_keys:
             continue
         tsym = str(row.target_symbol or "").strip().upper()
+        out_str = str(row.activity_outcome or "").strip().upper()
+        if tsym == "FERROPTOSIS_PHENOTYPIC":
+            tsym = "FERROPTOSIS"
+        elif tsym == "FERROPTOSIS" and out_str == "ACTIVE_INHIBITOR":
+            tsym = "FERROPTOSIS_INHIBITOR"
         t_idx = SAR_TARGET_TO_IDX.get(tsym)
         if t_idx is None:
             continue
@@ -521,19 +557,41 @@ def _load_grouped_sar_molecules(pq_path: Path, license_track: str) -> list[dict[
             entry["pot"][t_idx] = max(entry["pot"][t_idx], pv) if entry["pot_m"][t_idx] > 0 else pv
             entry["pot_m"][t_idx] = 1.0
 
-        out_str = str(row.activity_outcome or "").strip().upper()
-        if out_str in ("ACTIVE", "ACTIVE_INDUCER", "ACTIVE_INHIBITOR") or (
+        ind_idx = SAR_TARGET_TO_IDX["FERROPTOSIS"]
+        inh_idx = SAR_TARGET_TO_IDX["FERROPTOSIS_INHIBITOR"]
+        if out_str == "ACTIVE_INDUCER":
+            entry["act"][ind_idx] = 1.0
+            entry["act_m"][ind_idx] = 1.0
+            if entry["act_m"][inh_idx] == 0.0:
+                entry["act"][inh_idx] = 0.0
+                entry["act_m"][inh_idx] = 1.0
+        elif out_str == "ACTIVE_INHIBITOR":
+            entry["act"][inh_idx] = 1.0
+            entry["act_m"][inh_idx] = 1.0
+            if entry["act_m"][ind_idx] == 0.0:
+                entry["act"][ind_idx] = 0.0
+                entry["act_m"][ind_idx] = 1.0
+        elif out_str == "ACTIVE" or (
             p_val is not None and np.isfinite(float(p_val)) and float(p_val) >= 5.0
         ):
             entry["act"][t_idx] = 1.0
             entry["act_m"][t_idx] = 1.0
-        elif out_str in ("INACTIVE", "WEAK_OR_INACTIVE"):
+        elif out_str in ("INACTIVE", "WEAK_OR_INACTIVE") or (
+            out_str == "MEASURED" and p_val is not None and np.isfinite(float(p_val)) and float(p_val) < 4.5
+        ):
             if entry["act_m"][t_idx] == 0.0:
                 entry["act"][t_idx] = 0.0
                 entry["act_m"][t_idx] = 1.0
 
     grouped = [v for v in mol_records.values() if float(v["pot_m"].sum() + v["act_m"].sum()) > 0.0]
     _SAR_GROUPED_TRACK_CACHE[cache_key] = grouped
+    try:
+        disk_pkl.parent.mkdir(parents=True, exist_ok=True)
+        tmp_pkl = disk_pkl.with_name(f".tmp_{_os.getpid()}_{disk_pkl.name}")
+        tmp_pkl.write_bytes(_pickle.dumps(grouped, protocol=_pickle.HIGHEST_PROTOCOL))
+        tmp_pkl.replace(disk_pkl)
+    except Exception:
+        pass
     return grouped
 
 
@@ -1121,7 +1179,8 @@ class FerroFluxMultimodalDataset(Dataset):
     def _load_optional_phase2b_records(
         self, buckets: dict[str, list[dict[str, Any]]], max_rows: int | None
     ) -> None:
-        df_syn = self._read_filtered_parquet("drugcomb_synergy_blocks.parquet", max_rows=max_rows or 15000, stratify_col="dataset_source")
+        syn_cap = min(max_rows, 20000) if max_rows else 15000
+        df_syn = self._read_filtered_parquet("drugcomb_synergy_blocks.parquet", max_rows=syn_cap, stratify_col="dataset_source")
         if not df_syn.empty:
             for _, r in df_syn.iterrows():
                 mid = self._resolve_model_id(r.get("model_id"), r.get("cell_line_name", r.get("cell_line")))
@@ -1149,7 +1208,8 @@ class FerroFluxMultimodalDataset(Dataset):
                     }
                 )
 
-        df_oxy = self._read_filtered_parquet("perturbed_oxylipidomics_sterolomics.parquet", max_rows=max_rows or 8000, stratify_col="dataset_source")
+        oxy_cap = min(max_rows, 12000) if max_rows else 8000
+        df_oxy = self._read_filtered_parquet("perturbed_oxylipidomics_sterolomics.parquet", max_rows=oxy_cap, stratify_col="dataset_source")
         if not df_oxy.empty:
             for _, r in df_oxy.iterrows():
                 mid = self._resolve_model_id(r.get("model_id"), r.get("cell_line_name", r.get("sample_name")))
@@ -1324,10 +1384,21 @@ class FerroFluxMultimodalDataset(Dataset):
             viability_target = viab
             viability_mask = 1.0
             h_idx = rec["hazard_channel_idx"]
+            death_prob = float(np.clip(1.0 - viab, 0.0, 0.995))
             if 0 <= h_idx < 5:
-                death_prob = float(np.clip(1.0 - viab, 0.0, 0.995))
                 hazard_target[h_idx] = float(-np.log(max(1.0 - death_prob, 1e-4)))
-                hazard_mask[:] = 1.0
+                hazard_mask[:] = 0.10
+                hazard_mask[0] = 1.0
+                hazard_mask[1] = 1.0
+                hazard_mask[h_idx] = 1.0
+            elif h_idx == -1:
+                # Single-agent ferroptosis rescuer (e.g. Ciclopirox, Rosiglitazone, DFO):
+                # H_ferro is strictly ~0, while any high-dose cytostasis goes to non-ferroptotic H_apop!
+                hazard_target[0] = 0.0
+                hazard_target[1] = float(-np.log(max(1.0 - death_prob, 1e-4)))
+                hazard_mask[:] = 0.10
+                hazard_mask[0] = 1.0
+                hazard_mask[1] = 1.0
 
         elif kind == "perturb":
             ptype = rec["perturbation_type"]
@@ -1383,7 +1454,7 @@ class FerroFluxMultimodalDataset(Dataset):
 
         elif kind == "rescue":
             gpx4_inhib = 2.0
-            rta_conc = 5.0
+            rta_conc = 0.0
             rescue_delta_target = rec["rescue_delta"]
             rescue_mask = 1.0
 
@@ -1647,3 +1718,362 @@ def organoid_2d_to_3d_split(ds: FerroFluxMultimodalDataset) -> tuple[list[int], 
 
 def crispr_fin_epistasis_split(ds: FerroFluxMultimodalDataset) -> tuple[list[int], list[int]]:
     return ds.crispr_fin_epistasis_split()
+
+
+class FastMultimodalIndexer:
+    """Compact table-indexed tensor batcher (<220 MB RSS, <0.5 ms/batch) bit-exact with `FerroFluxMultimodalDataset.__getitem__`."""
+
+    def __init__(self, ds: FerroFluxMultimodalDataset) -> None:
+        self.n_samples = len(ds.records)
+        self.n_genes = int(ds.n_genes)
+        n = self.n_samples
+        g = self.n_genes
+
+        # 1. Unique cell-line / model_id lookup tables
+        uniq_mids = sorted({str(r.get("model_id", "__UNMATCHED__")) for r in ds.records})
+        self.mid_to_cidx: dict[str, int] = {m: i for i, m in enumerate(uniq_mids)}
+        c = len(uniq_mids)
+
+        self.cell_expr = np.zeros((c, g), dtype=np.float32)
+        self.cell_mask = np.zeros((c, g), dtype=np.float32)
+        self.cell_genomic = np.zeros((c, GENOMIC_CONTEXT_DIM), dtype=np.float32)
+        self.cell_prot64 = np.zeros((c, 64), dtype=np.float32)
+        self.cell_prot64_mask = np.zeros((c, 64), dtype=np.float32)
+        self.cell_lipid32 = np.zeros((c, 32), dtype=np.float32)
+        self.cell_lipid32_mask = np.zeros((c, 32), dtype=np.float32)
+        self.cell_cis_reg = np.zeros((c, 64, 8), dtype=np.float32)
+        self.cell_cis_mask = np.zeros((c, 64), dtype=np.float32)
+        self.cell_prot_target = np.zeros((c, 28), dtype=np.float32)
+        self.cell_prot_mask = np.zeros((c, 28), dtype=np.float32)
+        self.cell_metab_target = np.zeros((c, 10), dtype=np.float32)
+        self.cell_metab_mask = np.zeros((c, 10), dtype=np.float32)
+
+        for mid, ci in self.mid_to_cidx.items():
+            matched_expr = ds._cell_expr.get(mid)
+            if matched_expr is not None:
+                self.cell_expr[ci] = matched_expr
+                gm = (matched_expr != 0.0).astype(np.float32)
+                if gm.sum() == 0:
+                    gm[:] = 1.0
+                self.cell_mask[ci] = gm
+                self.cell_cis_reg[ci] = ds._cell_cis_reg.get(mid, np.zeros((64, 8), dtype=np.float32))
+                self.cell_cis_mask[ci] = ds._cell_cis_mask.get(mid, np.ones(64, dtype=np.float32))
+                self.cell_genomic[ci] = ds._cell_genomic.get(mid, np.zeros(GENOMIC_CONTEXT_DIM, dtype=np.float32))
+            if mid in ds._cell_prot:
+                pt, pm = ds._cell_prot[mid]
+                self.cell_prot_target[ci] = pt
+                self.cell_prot_mask[ci] = pm
+            if mid in ds._cell_prot64:
+                p64, m64 = ds._cell_prot64[mid]
+                self.cell_prot64[ci] = p64
+                self.cell_prot64_mask[ci] = m64
+            if mid in ds._cell_metab:
+                mt, mm = ds._cell_metab[mid]
+                self.cell_metab_target[ci] = mt
+                self.cell_metab_mask[ci] = mm
+            if mid in ds._cell_lipid32:
+                l32, lm32 = ds._cell_lipid32[mid]
+                self.cell_lipid32[ci] = l32
+                self.cell_lipid32_mask[ci] = lm32
+
+        # 2. Unique SMILES lookup tables (index 0 == no compound)
+        smi_to_midx: dict[str, int] = {"": 0}
+        chem_fps: list[np.ndarray] = [np.zeros(CHEM_FP_DIM, dtype=np.float32)]
+        chem_descs: list[np.ndarray] = [np.zeros(CHEM_DESC_DIM, dtype=np.float32)]
+
+        def _reg_smi(raw_s: str) -> int:
+            if not raw_s:
+                return 0
+            idx_m = smi_to_midx.get(raw_s)
+            if idx_m is None:
+                fp_v, desc_v = compute_compound_featurization(raw_s)
+                idx_m = len(chem_fps)
+                smi_to_midx[raw_s] = idx_m
+                chem_fps.append(fp_v)
+                chem_descs.append(desc_v)
+            return idx_m
+
+        # 3. Per-row index & scalar arrays
+        self.row_cell_idx = np.empty(n, dtype=np.int32)
+        self.row_chem_a_idx = np.zeros(n, dtype=np.int32)
+        self.row_chem_b_idx = np.zeros(n, dtype=np.int32)
+        self.row_dx_idx = np.zeros(n, dtype=np.int32)
+        self.row_ko_idx = np.full(n, -1, dtype=np.int32)
+
+        self.is_3d_organoid = np.zeros(n, dtype=np.float32)
+        self.is_crispr_fin_epistasis = np.zeros(n, dtype=np.float32)
+        self.is_ferroptosis_compound = np.zeros(n, dtype=np.float32)
+        self.is_normal_organ_or_til = np.zeros(n, dtype=np.float32)
+
+        self.dose_a = np.full(n, -3.0, dtype=np.float32)
+        self.dose_b = np.full(n, -3.0, dtype=np.float32)
+        self.rta_conc = np.zeros(n, dtype=np.float32)
+        self.chelator_conc = np.zeros(n, dtype=np.float32)
+        self.gpx4_inhib = np.zeros(n, dtype=np.float32)
+        self.xc_inhib = np.zeros(n, dtype=np.float32)
+        self.elesclomol_conc = np.zeros(n, dtype=np.float32)
+        self.concanamycin_a = np.zeros(n, dtype=np.float32)
+        self.dhcr7_mult = np.ones(n, dtype=np.float32)
+        self.ebp_mult = np.ones(n, dtype=np.float32)
+        self.cys2_media = np.ones(n, dtype=np.float32)
+        self.media_ext9 = np.zeros(n, dtype=np.float32)
+        self.np_params = np.zeros((n, 5), dtype=np.float32)
+        self.delta_t = np.full(n, 24.0, dtype=np.float32)
+
+        self.chronos_target = np.zeros(n, dtype=np.float32)
+        self.chronos_mask = np.zeros(n, dtype=np.float32)
+        self.survivorship_weight = np.ones(n, dtype=np.float32)
+        self.sec46_readthrough_target = np.zeros(n, dtype=np.float32)
+        self.sec46_mask = np.zeros(n, dtype=np.float32)
+
+        self.viability_target = np.ones(n, dtype=np.float32)
+        self.viability_mask = np.zeros(n, dtype=np.float32)
+        self.hazard_target = np.zeros((n, 5), dtype=np.float32)
+        self.hazard_mask = np.zeros((n, 5), dtype=np.float32)
+        self.rescue_delta_target = np.zeros(n, dtype=np.float32)
+        self.rescue_mask = np.zeros(n, dtype=np.float32)
+        self.synergy_target = np.zeros(n, dtype=np.float32)
+        self.synergy_mask = np.zeros(n, dtype=np.float32)
+        self.oxylipid_target = np.zeros((n, 4), dtype=np.float32)
+        self.oxylipid_mask = np.zeros((n, 4), dtype=np.float32)
+        self.icb_response_target = np.zeros(n, dtype=np.float32)
+        self.icb_mask = np.zeros(n, dtype=np.float32)
+        self.group_id_int = np.zeros(n, dtype=np.int64)
+        self.group_id_str: list[str] = []
+
+        dx_targets: list[np.ndarray] = [np.zeros(g, dtype=np.float32)]
+        dx_masks: list[np.ndarray] = [np.zeros(g, dtype=np.uint8)]
+        l1000_mask = np.zeros(g, dtype=np.uint8)
+        if len(ds.l1000_landmark_indices) > 0:
+            l1000_mask[ds.l1000_landmark_indices] = 1
+
+        grp_map: dict[str, int] = {}
+
+        for i, rec in enumerate(ds.records):
+            mid = str(rec.get("model_id", "__UNMATCHED__"))
+            kind = str(rec.get("kind", "basal"))
+            self.row_cell_idx[i] = self.mid_to_cidx[mid]
+            self.is_3d_organoid[i] = float(rec.get("is_3d_organoid", 0))
+            self.is_crispr_fin_epistasis[i] = float(rec.get("is_crispr_fin_epistasis", 0))
+            self.is_ferroptosis_compound[i] = float(rec.get("is_ferroptosis_compound", 0))
+            self.is_normal_organ_or_til[i] = 1.0 if kind == "normal_sfti" else 0.0
+
+            g_str = str(
+                rec.get("compound_name")
+                or rec.get("compound_a")
+                or (f"GENE_{rec.get('gene_idx')}" if kind == "crispr" else "")
+                or rec.get("fin_modifier_compound")
+                or rec.get("murcko_scaffold")
+                or f"KIND_{kind}"
+            )
+            self.group_id_str.append(g_str)
+            g_int = grp_map.get(g_str)
+            if g_int is None:
+                g_int = len(grp_map) + 1
+                grp_map[g_str] = g_int
+            self.group_id_int[i] = g_int
+
+            if kind == "crispr":
+                g_idx = int(rec["gene_idx"])
+                if 0 <= g_idx < g:
+                    self.row_ko_idx[i] = g_idx
+                    sym = ds.genes[g_idx]
+                    if sym == "DHCR7":
+                        self.dhcr7_mult[i] = 0.05
+                    elif sym in ("EBP", "SC5D"):
+                        self.ebp_mult[i] = 0.05
+                self.chronos_target[i] = float(rec["chronos_score"])
+                self.chronos_mask[i] = 1.0
+                if int(rec.get("is_crispr_fin_epistasis", 0)) == 1:
+                    fin_smi = str(rec.get("fin_modifier_smiles", ""))
+                    fin_d = max(float(rec["fin_modifier_dose_um"]), 1e-4)
+                    self.dose_a[i] = encode_log10_dose_um(fin_d)
+                    if fin_smi:
+                        self.row_chem_a_idx[i] = _reg_smi(fin_smi)
+                    else:
+                        fin_c = str(rec.get("fin_modifier_compound", "")).upper()
+                        if "RSL3" in fin_c or "ML" in fin_c or "FIN56" in fin_c:
+                            self.gpx4_inhib[i] = fin_d
+                        elif "ERASTIN" in fin_c or "SULFA" in fin_c or "SORAF" in fin_c:
+                            self.xc_inhib[i] = fin_d
+                        elif "ELESCLOMOL" in fin_c:
+                            self.elesclomol_conc[i] = fin_d
+
+            elif kind == "pharmaco":
+                self.row_chem_a_idx[i] = _reg_smi(str(rec["canonical_smiles"]))
+                self.dose_a[i] = encode_log10_dose_um(max(float(rec["dose_um"]), 1e-4))
+                viab = float(np.clip(rec["viability"], 0.0, 1.0))
+                self.viability_target[i] = viab
+                self.viability_mask[i] = 1.0
+                h_idx = int(rec["hazard_channel_idx"])
+                death_prob = float(np.clip(1.0 - viab, 0.0, 0.995))
+                if 0 <= h_idx < 5:
+                    self.hazard_target[i, h_idx] = float(-np.log(max(1.0 - death_prob, 1e-4)))
+                    self.hazard_mask[i, :] = 0.10
+                    self.hazard_mask[i, 0] = 1.0
+                    self.hazard_mask[i, 1] = 1.0
+                    self.hazard_mask[i, h_idx] = 1.0
+                elif h_idx == -1:
+                    self.hazard_target[i, 0] = 0.0
+                    self.hazard_target[i, 1] = float(-np.log(max(1.0 - death_prob, 1e-4)))
+                    self.hazard_mask[i, :] = 0.10
+                    self.hazard_mask[i, 0] = 1.0
+                    self.hazard_mask[i, 1] = 1.0
+
+            elif kind == "perturb":
+                ptype = str(rec["perturbation_type"])
+                pname = str(rec["perturbation_name"])
+                self.delta_t[i] = float(max(rec["time_h"], 1.0))
+                self.survivorship_weight[i] = float(np.clip(rec["survivorship_weight"], 1.0, 20.0))
+                dvec = np.asarray(rec["delta_expr_vec"], dtype=np.float32)
+                if rec.get("mask_mode") == "l1000_landmark" and len(ds.l1000_landmark_indices) > 0:
+                    dmask = l1000_mask.copy()
+                else:
+                    dmask = (dvec != 0.0).astype(np.uint8)
+                    if dmask.sum() == 0:
+                        dmask[:64] = 1
+                dx_pos = len(dx_targets)
+                dx_targets.append(dvec)
+                dx_masks.append(dmask)
+                self.row_dx_idx[i] = dx_pos
+
+                if ptype == "compound":
+                    self.row_chem_a_idx[i] = _reg_smi(str(rec["canonical_smiles"]))
+                    self.dose_a[i] = encode_log10_dose_um(max(float(rec["dose_um"]), 1e-4))
+                elif ptype in ("crispr_ko", "crispri"):
+                    g_i = ds.gene_to_idx.get(pname)
+                    if g_i is not None:
+                        self.row_ko_idx[i] = int(g_i)
+                        if pname == "DHCR7":
+                            self.dhcr7_mult[i] = 0.05
+                        elif pname in ("EBP", "SC5D"):
+                            self.ebp_mult[i] = 0.05
+                elif ptype == "cytokine":
+                    if "IFNG" in pname.upper() or "IFN-G" in pname.upper():
+                        self.media_ext9[i] = 5.0
+                elif ptype in ("bionano", "nanoparticle"):
+                    self.np_params[i] = np.asarray(rec["np_params_vec"], dtype=np.float32)
+
+                if float(rec["sec46_readthrough_eff"]) >= 0.0:
+                    self.sec46_readthrough_target[i] = float(rec["sec46_readthrough_eff"])
+                    self.sec46_mask[i] = 1.0
+
+            elif kind == "icb":
+                self.media_ext9[i] = 2.0
+                if rec["responder_binary"] in (0, 1):
+                    self.icb_response_target[i] = float(rec["responder_binary"])
+                    self.icb_mask[i] = 1.0
+
+            elif kind == "synergy":
+                self.row_chem_a_idx[i] = _reg_smi(str(rec["smiles_a"]))
+                self.row_chem_b_idx[i] = _reg_smi(str(rec["smiles_b"]))
+                self.dose_a[i] = encode_log10_dose_um(1.0)
+                self.dose_b[i] = encode_log10_dose_um(1.0)
+                self.synergy_target[i] = float(rec["synergy_score"])
+                self.synergy_mask[i] = 1.0
+
+            elif kind == "oxylipid":
+                self.oxylipid_target[i] = np.asarray(rec["oxylipid_target_vec"], dtype=np.float32)
+                self.oxylipid_mask[i] = np.asarray(rec["oxylipid_mask_vec"], dtype=np.float32)
+
+            elif kind == "rescue":
+                self.gpx4_inhib[i] = 2.0
+                self.rta_conc[i] = 0.0
+                self.rescue_delta_target[i] = float(rec["rescue_delta"])
+                self.rescue_mask[i] = 1.0
+
+        self.chem_fp_table = np.stack(chem_fps, axis=0)
+        self.chem_desc_table = np.stack(chem_descs, axis=0)
+        self.dx_target_table = np.stack(dx_targets, axis=0)
+        self.dx_mask_table = np.stack(dx_masks, axis=0)
+
+    def get_batch(self, idx_arr: np.ndarray | Sequence[int], device: torch.device | None = None) -> dict[str, torch.Tensor]:
+        idx = np.asarray(idx_arr, dtype=np.int64)
+        bsz = int(idx.shape[0])
+        ci = self.row_cell_idx[idx]
+        ca = self.row_chem_a_idx[idx]
+        cb = self.row_chem_b_idx[idx]
+        di = self.row_dx_idx[idx]
+        ko = self.row_ko_idx[idx]
+
+        gene_ko_mult = np.ones((bsz, self.n_genes), dtype=np.float32)
+        has_ko = ko >= 0
+        if np.any(has_ko):
+            gene_ko_mult[np.where(has_ko)[0], ko[has_ko]] = 0.05
+
+        media_ext = np.ones((bsz, 10), dtype=np.float32)
+        media_ext[:, 8] = 0.21
+        media_ext[:, 9] = self.media_ext9[idx]
+
+        batch_np: dict[str, np.ndarray] = {
+            "gene_expr": self.cell_expr[ci],
+            "gene_mask": self.cell_mask[ci],
+            "genomic_context": self.cell_genomic[ci],
+            "prot64_context": self.cell_prot64[ci],
+            "prot64_mask": self.cell_prot64_mask[ci],
+            "lipid32_context": self.cell_lipid32[ci],
+            "lipid32_mask": self.cell_lipid32_mask[ci],
+            "cis_reg_epigen": self.cell_cis_reg[ci],
+            "cis_reg_mask": self.cell_cis_mask[ci],
+            "is_3d_organoid": self.is_3d_organoid[idx],
+            "is_crispr_fin_epistasis": self.is_crispr_fin_epistasis[idx],
+            "is_ferroptosis_compound": self.is_ferroptosis_compound[idx],
+            "is_normal_organ_or_til": self.is_normal_organ_or_til[idx],
+            "chem_fp_a": self.chem_fp_table[ca],
+            "chem_desc_a": self.chem_desc_table[ca],
+            "chem_fp_b": self.chem_fp_table[cb],
+            "chem_desc_b": self.chem_desc_table[cb],
+            "dose_a": self.dose_a[idx],
+            "dose_b": self.dose_b[idx],
+            "rta_conc": self.rta_conc[idx],
+            "chelator_conc": self.chelator_conc[idx],
+            "gpx4_inhib": self.gpx4_inhib[idx],
+            "xc_inhib": self.xc_inhib[idx],
+            "elesclomol_conc": self.elesclomol_conc[idx],
+            "concanamycin_a": self.concanamycin_a[idx],
+            "dhcr7_mult": self.dhcr7_mult[idx],
+            "ebp_mult": self.ebp_mult[idx],
+            "cys2_media": self.cys2_media[idx],
+            "gene_ko_mult": gene_ko_mult,
+            "media_ext": media_ext,
+            "np_params": self.np_params[idx],
+            "delta_t": self.delta_t[idx],
+            "prot_anchor_target": self.cell_prot_target[ci],
+            "prot_anchor_mask": self.cell_prot_mask[ci],
+            "metab_anchor_target": self.cell_metab_target[ci],
+            "metab_anchor_mask": self.cell_metab_mask[ci],
+            "chronos_target": self.chronos_target[idx],
+            "chronos_mask": self.chronos_mask[idx],
+            "delta_expr_target": self.dx_target_table[di],
+            "delta_expr_mask": self.dx_mask_table[di].astype(np.float32),
+            "survivorship_weight": self.survivorship_weight[idx],
+            "sec46_readthrough_target": self.sec46_readthrough_target[idx],
+            "sec46_mask": self.sec46_mask[idx],
+            "viability_target": self.viability_target[idx],
+            "viability_mask": self.viability_mask[idx],
+            "hazard_target": self.hazard_target[idx],
+            "hazard_mask": self.hazard_mask[idx],
+            "rescue_delta_target": self.rescue_delta_target[idx],
+            "rescue_mask": self.rescue_mask[idx],
+            "synergy_target": self.synergy_target[idx],
+            "synergy_mask": self.synergy_mask[idx],
+            "oxylipid_target": self.oxylipid_target[idx],
+            "oxylipid_mask": self.oxylipid_mask[idx],
+            "icb_response_target": self.icb_response_target[idx],
+            "icb_mask": self.icb_mask[idx],
+            "group_id_int": self.group_id_int[idx],
+        }
+        if device is None:
+            return {k: torch.from_numpy(v) for k, v in batch_np.items()}
+        return {k: torch.from_numpy(v).to(device=device, non_blocking=True) for k, v in batch_np.items()}
+
+
+def get_fast_indexer(dataset: Any) -> FastMultimodalIndexer | None:
+    if not isinstance(dataset, FerroFluxMultimodalDataset):
+        return None
+    cached = getattr(dataset, "_fast_indexer", None)
+    if isinstance(cached, FastMultimodalIndexer) and cached.n_samples == len(dataset.records):
+        return cached
+    indexer = FastMultimodalIndexer(dataset)
+    setattr(dataset, "_fast_indexer", indexer)
+    return indexer

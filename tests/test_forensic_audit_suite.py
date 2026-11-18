@@ -242,3 +242,68 @@ def test_v3_aphynity_greybox_and_four_corner_epistasis_laws() -> None:
             f"4-corner epistasis must rank ACSL4 KO rescue ({ep_acsl4.tolist()}) above AIFM2 KO synthetic lethality ({ep_aifm2.tolist()})!"
         )
 
+
+def test_v3_comma_smiles_sanitization_and_bidentate_cu_ionophore() -> None:
+    from ferroflux.data.dataset import canonicalize_smiles_and_keys, compute_compound_featurization
+
+    # PRISM comma-delimited replicate SMILES must parse identically to clean single SMILES
+    disulf_single = "CCN(CC)C(=S)SSC(=S)N(CC)CC"
+    disulf_prism = f"{disulf_single}, {disulf_single}, {disulf_single}"
+    c1, ik1, sc1 = canonicalize_smiles_and_keys(disulf_single)
+    c2, ik2, sc2 = canonicalize_smiles_and_keys(disulf_prism)
+    assert c1 == c2 and len(ik1) == 14 and ik1 == ik2 and sc1 == sc2
+
+    fp1, d1 = compute_compound_featurization(disulf_single)
+    fp2, d2 = compute_compound_featurization(disulf_prism)
+    assert np.array_equal(fp1, fp2) and np.array_equal(d1, d2)
+    assert float(fp2.sum()) > 10.0 and float(d2[11]) == 1.0
+
+    # Necrostatin-1 has only 1 cyclic C=S carbon -> must NOT trigger bidentate Cu-ionophore descriptor
+    _, d_nec = compute_compound_featurization("CN1C(=O)NC(Cc2c[nH]c3ccccc23)C1=S")
+    assert float(d_nec[11]) == 0.0
+
+
+def test_v3_txnrd1_auranofin_connectivity_and_rescue_non_contradiction() -> None:
+    from ferroflux.data.dataset import FerroFluxMultimodalDataset, compute_compound_featurization, encode_log10_dose_um
+
+    torch.manual_seed(19)
+    m = FerroFluxFM(n_genes=256, d_model=64, n_layers=2, n_heads=2)
+    m.eval()
+    aur_smi = "CC[P+](CC)(CC)[Au-][S]C1OC(COC(C)=O)C(OC(C)=O)C(OC(C)=O)C1OC(C)=O"
+    fp_aur, d_aur = compute_compound_featurization(aur_smi)
+    x = torch.ones(2, 256) * 1.2
+    out_veh = m({"gene_expr": x})
+    out_aur = m(
+        {
+            "gene_expr": x,
+            "chem_fp_a": torch.from_numpy(np.stack([fp_aur, fp_aur])),
+            "chem_desc_a": torch.from_numpy(np.stack([d_aur, d_aur])),
+            "dose_a": torch.full((2,), encode_log10_dose_um(5.0)),
+        }
+    )
+    assert bool((out_aur["h_ferro"] > out_veh["h_ferro"]).all())
+    assert bool((out_aur["h_disulf"] > out_veh["h_disulf"]).all())
+    out_aur["viability_pred"].sum().backward()
+    assert m.raw_k_txnrd1_tox.grad is not None and float(m.raw_k_txnrd1_tox.grad.abs().item()) > 1e-8
+
+    ds = FerroFluxMultimodalDataset(data_dir=ROOT_DIR / "data" / "processed", license_track="academic", max_samples_per_shard=1500)
+    rec_idx = next((i for i, r in enumerate(ds.records) if r.get("kind") == "rescue"), None)
+    if rec_idx is not None:
+        item = ds[rec_idx]
+        assert float(item["gpx4_inhib"].item()) > 0.0
+        assert float(item["rta_conc"].item()) == 0.0
+
+
+def test_v3_fast_multimodal_indexer_exact_parity() -> None:
+    from ferroflux.data.dataset import FerroFluxMultimodalDataset, get_fast_indexer
+
+    ds = FerroFluxMultimodalDataset(data_dir=ROOT_DIR / "data" / "processed", license_track="open", max_samples_per_shard=800)
+    idxr = get_fast_indexer(ds)
+    assert idxr is not None
+    sample_idx = list(range(0, min(len(ds), 64), 3))
+    ref_b = ds.collate_fn([ds[i] for i in sample_idx])
+    fast_b = idxr.get_batch(sample_idx)
+    for k, rv in ref_b.items():
+        assert float((rv - fast_b[k]).abs().max().item()) < 1e-6, f"Parity mismatch on {k}"
+
+

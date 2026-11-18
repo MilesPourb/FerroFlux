@@ -401,8 +401,12 @@ class GeneToModulePerceiverTrunk(nn.Module):
 
         z_modules = self.final_norm(tokens)
         z_pathway = z_modules[:, : self.n_pathway_modules, :].mean(dim=1)
-        z_context = z_modules[:, self.n_pathway_modules :, :].mean(dim=1)
-        z_cell = 0.5 * (z_pathway + z_context)
+        if self.n_modules > self.n_pathway_modules:
+            z_context = z_modules[:, self.n_pathway_modules :, :].mean(dim=1)
+            z_cell = 0.5 * (z_pathway + z_context)
+        else:
+            z_context = z_pathway
+            z_cell = z_pathway
 
         if self.ablate_physical_anchors:
             p_hat_log = torch.zeros(bsz, len(ANCHOR_28_PROTEINS), device=x.device, dtype=dtype)

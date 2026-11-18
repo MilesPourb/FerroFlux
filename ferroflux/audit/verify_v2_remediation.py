@@ -137,7 +137,7 @@ def run_v2_verification() -> dict[str, Any]:
     out_tr["viability_pred"].sum().backward()
     rcd17_gn = float(m.other_17_rcd_head.weight.grad.norm().item()) if m.other_17_rcd_head.weight.grad is not None else 0.0
     with torch.no_grad():
-        occ_z, _, _, _, _, _ = m.perturbation_op._encode_single_drug(
+        occ_z, *_ = m.perturbation_op._encode_single_drug(
             torch.ones(1, 2048),
             torch.ones(1, 12),
             torch.tensor([encode_log10_dose_um(0.0)]),

@@ -284,15 +284,21 @@ def extract_multimodal_arrays(
     else:
         n_total = len(dataset_or_dict)
         n = min(n_total, max_samples) if max_samples is not None else n_total
+        from ferroflux.data.dataset import get_fast_indexer
+
+        fast_idxr = get_fast_indexer(dataset_or_dict)
         collate = getattr(dataset_or_dict, "collate_fn", None)
-        eff_bs = 2048 if n > 2048 else batch_size
-        loader = DataLoader(
-            dataset_or_dict,
-            batch_size=eff_bs,
-            shuffle=False,
-            num_workers=0,
-            collate_fn=collate,
-        )
+        eff_bs = 4096 if n > 4096 else batch_size
+        if fast_idxr is not None:
+            batch_iter: Any = (fast_idxr.get_batch(np.arange(s, min(n, s + eff_bs))) for s in range(0, n, eff_bs))
+        else:
+            batch_iter = DataLoader(
+                dataset_or_dict,
+                batch_size=eff_bs,
+                shuffle=False,
+                num_workers=0,
+                collate_fn=collate,
+            )
         sample0 = dataset_or_dict[0]
         g_dim = int(sample0["gene_expr"].shape[-1])
         fp_dim = int(sample0["chem_fp_a"].shape[-1]) if "chem_fp_a" in sample0 else 2048
@@ -342,7 +348,7 @@ def extract_multimodal_arrays(
         lic_list: list[str] = []
 
         seen = 0
-        for batch in loader:
+        for batch in batch_iter:
             bsz = batch["gene_expr"].shape[0]
             take = min(bsz, n - seen)
             sl = slice(seen, seen + take)

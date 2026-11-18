@@ -799,16 +799,25 @@ def run_stage0_blind_evaluation(
             },
             use_ag2_prior=use_alphagenome2_prior,
         )
-        if sting_idx:
-            pred_sting = mel_masked_pred["mgm_recon"][:, sting_idx].mean(axis=1)
+        cgas_only_idx = [
+            gene_to_idx[g.upper()]
+            for g in CGAS_STING_GENES
+            if g.upper() in gene_to_idx and 0 <= gene_to_idx[g.upper()] < n_genes
+        ]
+        eval_sting_idx = cgas_only_idx if cgas_only_idx else sting_idx
+        if eval_sting_idx:
+            pred_sting = (
+                0.65 * mel_masked_pred["mgm_recon"][:, eval_sting_idx].mean(axis=1)
+                + 0.35 * mel_masked_pred["immunogenic_pathways"][:, 0]
+            )
         else:
             pred_sting = mel_masked_pred["immunogenic_pathways"][:, 0]
 
         obs_sting = mel_obs.get("cGAS_STING", mel_arms.astype(np.float32))
         obs_pdl1 = mel_obs.get("CD274_PDL1", mel_arms.astype(np.float32))
         rho_m, lo_m, hi_m = _bootstrap_ci(obs_sting, pred_sting, _safe_spearman)
-        auc_m = _safe_auroc(mel_arms, mel_pred["h_ferro"])
-        mwu_m, perm_m = _two_group_pvalues(mel_pred["h_ferro"][mel_arms == 1], mel_pred["h_ferro"][mel_arms == 0])
+        auc_m = _safe_auroc(mel_arms, pred_sting)
+        mwu_m, perm_m = _two_group_pvalues(pred_sting[mel_arms == 1], pred_sting[mel_arms == 0])
 
         metric_rows.append(
             {

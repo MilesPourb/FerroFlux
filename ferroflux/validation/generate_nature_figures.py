@@ -702,8 +702,8 @@ def render_fig5_stage0_cdot_validation(out_dir: Path, tables_dir: Path = DEFAULT
 
     ax_a = fig.add_subplot(gs[0, 0])
     _panel_label(ax_a, "a")
-    v_veh = mel[mel["arm_tier"] == 0]["pred_h_ferro"].to_numpy()
-    v_cd = mel[mel["arm_tier"] == 1]["pred_h_ferro"].to_numpy()
+    v_veh = mel[mel["arm_tier"] == 0]["pred_cgas_sting"].to_numpy()
+    v_cd = mel[mel["arm_tier"] == 1]["pred_cgas_sting"].to_numpy()
     means_a = [float(np.mean(v_veh)), float(np.mean(v_cd))]
     sems_a = [
         float(np.std(v_veh, ddof=0) / max(1.0, np.sqrt(len(v_veh)))) * 1.96,
@@ -712,9 +712,9 @@ def render_fig5_stage0_cdot_validation(out_dir: Path, tables_dir: Path = DEFAULT
     ax_a.bar([0, 1], means_a, yerr=sems_a, color=[PALETTE["slate"], PALETTE["vermilion"]], width=0.5, capsize=4)
     ax_a.set_xticks([0, 1])
     ax_a.set_xticklabels([f"Control (n={len(v_veh)})", f"C' Dot (n={len(v_cd)})"])
-    ax_a.set_ylabel("Unconditioned RNA-Only H_ferro (95% CI)")
+    ax_a.set_ylabel("Blind Masked cGAS-STING Score (95% CI)")
     ax_a.set_title(
-        f"GSE310954 Unconditioned Blind Shift (AUROC={m_mel_row['auroc']:.2f}, p={m_mel_row['mannwhitney_p']:.3f})"
+        f"GSE310954 Blind Arm Shift (AUROC={m_mel_row['auroc']:.2f}, p={m_mel_row['mannwhitney_p']:.3f})"
     )
 
     ax_b = fig.add_subplot(gs[0, 1])

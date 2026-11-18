@@ -214,6 +214,9 @@ class _ChemResidualSwiGLU(nn.Module):
         return x + self.ffn(self.norm(x))
 
 
+N_SAR_TARGETS: int = 21
+
+
 class CompositionalPerturbationOperator(nn.Module):
     """Composes multi-scale small-molecule, full-pathway genetic, media, and C' dot perturbations (v3)."""
 
@@ -232,20 +235,47 @@ class CompositionalPerturbationOperator(nn.Module):
         self.d_latent = int(d_latent)
         self.d_cell = int(d_cell)
         self.ablate_chem_prior = bool(ablate_chem_prior)
+        self.n_sar_targets = N_SAR_TARGETS
+        d_desc_hid = max(32, self.d_latent // 2)
 
+        self.chem_fp_proj = nn.Sequential(
+            nn.Linear(self.chem_fp_dim, self.d_latent),
+            nn.LayerNorm(self.d_latent),
+            nn.SiLU(),
+        )
+        self.chem_desc_proj = nn.Sequential(
+            nn.Linear(self.chem_desc_dim, d_desc_hid),
+            nn.LayerNorm(d_desc_hid),
+            nn.SiLU(),
+        )
         self.chem_in_proj = nn.Sequential(
-            nn.Linear(self.chem_in_dim, self.d_latent),
+            nn.Linear(self.d_latent + d_desc_hid, self.d_latent),
             nn.LayerNorm(self.d_latent),
             nn.SiLU(),
         )
         self.chem_blocks = nn.ModuleList(
-            [_ChemResidualSwiGLU(self.d_latent, dropout=0.05), _ChemResidualSwiGLU(self.d_latent, dropout=0.05)]
+            [
+                _ChemResidualSwiGLU(self.d_latent, dropout=0.05),
+                _ChemResidualSwiGLU(self.d_latent, dropout=0.05),
+                _ChemResidualSwiGLU(self.d_latent, dropout=0.05),
+            ]
         )
         self.chem_out_norm = nn.LayerNorm(self.d_latent)
-        self.chem_mech_head = nn.Linear(self.d_latent, 2 * len(CHEM_14_TARGETS) + 4)
 
-        # Stage-0.5 Biochemical & Phenotypic SAR Multi-Task Pretraining Head (`20` potency + `20` binary logits)
-        self.sar_pretrain_head = nn.Linear(self.d_latent, 40)
+        # Stage-0.5 Biochemical & Phenotypic SAR Multi-Task Pretraining Head (`21` potency + `21` binary logits)
+        self.sar_pretrain_head = nn.Linear(self.d_latent, 2 * self.n_sar_targets)
+        self.raw_sar_cell_offset = nn.Parameter(torch.tensor(0.20))
+
+        mech_in_dim = self.d_latent + 2 * self.n_sar_targets + self.chem_desc_dim
+        self.chem_mech_head = nn.Linear(mech_in_dim, 2 * len(CHEM_14_TARGETS) + 4)
+        self.desc_apop_head = nn.Linear(self.chem_desc_dim + 2 * self.n_sar_targets, 1)
+        nn.init.zeros_(self.desc_apop_head.weight)
+        nn.init.zeros_(self.desc_apop_head.bias)
+
+        # Learnable SMARTS warhead / pharmacophore pEC50 gains (initialized modest ~0.45-0.85 pEC50 units; zero saturation cliff!)
+        self.raw_motif_gains = nn.Parameter(
+            torch.tensor([-0.25, -0.10, -0.60, -0.50, -0.45, -0.50, 0.55, 0.25], dtype=torch.float32)
+        )
 
         # Cell-state bioactivation / efflux FiLM modulation on drug target pEC50 (`dose == 0 -> occ == 0` preserved!)
         self.cell_bioact_film = nn.Sequential(
@@ -256,7 +286,12 @@ class CompositionalPerturbationOperator(nn.Module):
         nn.init.zeros_(self.cell_bioact_film[-1].weight)
         nn.init.zeros_(self.cell_bioact_film[-1].bias)
 
-        self.dose_proj = nn.Linear(2, self.d_latent)
+        self.dose_proj = nn.Sequential(
+            nn.Linear(mech_in_dim + 3, self.d_latent),
+            nn.LayerNorm(self.d_latent),
+            nn.SiLU(),
+            nn.Linear(self.d_latent, self.d_latent),
+        )
 
         self.register_buffer(
             "cysdb_target_prior",
@@ -273,40 +308,33 @@ class CompositionalPerturbationOperator(nn.Module):
         """Encode `[fp, desc]` strictly from pure SMILES features into `[B, d_latent]`."""
         fp_aligned = self._align_vec(fp, self.chem_fp_dim)
         desc_aligned = self._align_vec(desc, self.chem_desc_dim)
-        h = self.chem_in_proj(torch.cat([fp_aligned, desc_aligned], dim=-1))
+        fp_reg = F.dropout(fp_aligned, p=0.28, training=self.training)
+        h_fp = self.chem_fp_proj(fp_reg)
+        h_desc = self.chem_desc_proj(desc_aligned)
+        h = self.chem_in_proj(torch.cat([h_fp, h_desc], dim=-1))
         for blk in self.chem_blocks:
             h = blk(h)
         return self.chem_out_norm(h)
 
-    def predict_sar_targets(self, fp: torch.Tensor, desc: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Predict Stage-0.5 multi-task biochemical `p_potency` `[B, 20]` and `active_logits` `[B, 20]`.
-
-        Couples shared enzymatic channels directly to `chem_mech_head` so Stage-0.5 SAR pretraining
-        transfers calibrated biochemical `pEC50` directly into Stage 1–4 `DiffFerroGEM` occupancy!
-        """
-        h = self.encode_chem_latent(fp, desc)
+    def _compute_sar_features(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         sar_raw = self.sar_pretrain_head(h)
-        mech_raw = self.chem_mech_head(h)
-        pec50_14 = 3.8 + 5.5 * torch.sigmoid(mech_raw[:, : len(CHEM_14_TARGETS)] - 1.5)
+        if self.ablate_chem_prior:
+            return torch.zeros_like(sar_raw), sar_raw
+        sar_pot_norm = torch.sigmoid(sar_raw[:, : self.n_sar_targets])
+        sar_act_prob = torch.sigmoid(sar_raw[:, self.n_sar_targets :])
+        return torch.cat([sar_pot_norm, sar_act_prob], dim=-1), sar_raw
 
-        pot_base = 4.0 + 5.5 * torch.sigmoid(sar_raw[:, :20])
-        # Couple the 13 overlapping biochemical targets (`SAR_20_TARGETS[0..12]`) with `pec50_14`
-        coupled_cols = list(pot_base.unbind(dim=-1))
-        coupled_cols[0] = 0.5 * coupled_cols[0] + 0.5 * torch.maximum(pec50_14[:, 0], pec50_14[:, 1])  # GPX4
-        coupled_cols[1] = 0.5 * coupled_cols[1] + 0.5 * pec50_14[:, 2]   # SLC7A11
-        coupled_cols[2] = 0.5 * coupled_cols[2] + 0.5 * pec50_14[:, 3]   # AIFM2 / FSP1
-        coupled_cols[3] = 0.5 * coupled_cols[3] + 0.5 * pec50_14[:, 4]   # DHODH
-        coupled_cols[4] = 0.5 * coupled_cols[4] + 0.5 * pec50_14[:, 6]   # ALOX12
-        coupled_cols[5] = 0.5 * coupled_cols[5] + 0.5 * pec50_14[:, 6]   # ALOX15
-        coupled_cols[6] = 0.5 * coupled_cols[6] + 0.5 * pec50_14[:, 6]   # ALOX5
-        coupled_cols[7] = 0.5 * coupled_cols[7] + 0.5 * pec50_14[:, 7]   # HMGCR
-        coupled_cols[8] = 0.5 * coupled_cols[8] + 0.5 * pec50_14[:, 8]   # DHCR7
-        coupled_cols[9] = 0.5 * coupled_cols[9] + 0.5 * pec50_14[:, 9]   # EBP
-        coupled_cols[10] = 0.5 * coupled_cols[10] + 0.5 * pec50_14[:, 10]  # SQLE
-        coupled_cols[11] = 0.5 * coupled_cols[11] + 0.5 * pec50_14[:, 11]  # TXNRD1
-        coupled_cols[12] = 0.5 * coupled_cols[12] + 0.5 * pec50_14[:, 13]  # CUPROPTOSIS
-        pred_potency = torch.stack(coupled_cols, dim=-1)
-        active_logits = sar_raw[:, 20:] + 1.2 * (pred_potency - 5.2)
+    def predict_sar_targets(self, fp: torch.Tensor, desc: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Predict Stage-0.5 multi-task biochemical `p_potency` `[B, 21]` and `active_logits` `[B, 21]`.
+
+        Decoupled from whole-cell `chem_mech_head` so Stage-0.5 nanomolar cell-free IC50s inform `sar_feats`
+        without forcing whole-cell viability EC50s to copy cell-free enzyme potencies!
+        """
+        desc_aligned = self._align_vec(desc, self.chem_desc_dim)
+        h = self.encode_chem_latent(fp, desc_aligned)
+        _, sar_raw = self._compute_sar_features(h)
+        pred_potency = 4.0 + 5.5 * torch.sigmoid(sar_raw[:, : self.n_sar_targets])
+        active_logits = sar_raw[:, self.n_sar_targets :] + 0.9 * (pred_potency - 5.2)
         return {
             "pred_potency": pred_potency,
             "active_logits": active_logits,
@@ -384,7 +412,9 @@ class CompositionalPerturbationOperator(nn.Module):
         active = drug_present * (dose_uM > 1e-7).to(dtype=dtype)
 
         h = self.encode_chem_latent(fp_aligned, desc_aligned)
-        raw = self.chem_mech_head(h)
+        sar_feats, sar_raw = self._compute_sar_features(h)
+        mech_in = torch.cat([h, sar_feats, desc_aligned], dim=-1)
+        raw = self.chem_mech_head(mech_in)
         n_t = len(CHEM_14_TARGETS)
 
         pec50 = 3.8 + 5.5 * torch.sigmoid(raw[:, :n_t] - 1.5)
@@ -393,7 +423,7 @@ class CompositionalPerturbationOperator(nn.Module):
         cell_film_shift = zeros_14
         if z_cell is not None and not self.ablate_chem_prior:
             zc_al = self._align_vec(z_cell.to(device=device, dtype=dtype), self.d_cell)
-            cell_film_shift = 0.75 * torch.tanh(self.cell_bioact_film(torch.cat([zc_al, h], dim=-1)))
+            cell_film_shift = 0.85 * torch.tanh(self.cell_bioact_film(torch.cat([zc_al, h], dim=-1)))
 
         if self.ablate_chem_prior:
             occ = torch.sigmoid(raw[:, :n_t] - 2.0) * active.unsqueeze(-1) * torch.tanh(0.2 * dose_uM.unsqueeze(-1))
@@ -402,9 +432,13 @@ class CompositionalPerturbationOperator(nn.Module):
         else:
             motif_boost = torch.zeros_like(pec50)
             if desc is not None:
+                mg = F.softplus(self.raw_motif_gains).to(device=device, dtype=dtype)
+                # Lipophilicity membrane permeability gate (`desc[:, 1] = logP / 5.0`)
+                perm_gate = 0.50 + 0.50 * torch.sigmoid(2.0 * (desc_aligned[:, 1] + 0.15))
+
                 cov_w = desc_aligned[:, 6].clamp(min=0.0)
                 endop = desc_aligned[:, 9].clamp(min=0.0)
-                statin_st = desc_aligned[:, 10].clamp(min=0.0)
+                statin_st = desc_aligned[:, 10].clamp(min=0.0) * perm_gate
                 thiocu = desc_aligned[:, 11].clamp(min=0.0)
                 quinaz = desc_aligned[:, 20].clamp(min=0.0) if desc_aligned.shape[-1] > 20 else zeros_1
                 dhodh_m = desc_aligned[:, 21].clamp(min=0.0) if desc_aligned.shape[-1] > 21 else zeros_1
@@ -413,34 +447,49 @@ class CompositionalPerturbationOperator(nn.Module):
 
                 cys_p = self.cysdb_target_prior.to(device=device, dtype=dtype)
                 motif_cols = list(motif_boost.unbind(dim=-1))
-                motif_cols[TARGET_TO_IDX["GPX4_cov"]] = 2.0 * cov_w * cys_p[0]
-                motif_cols[TARGET_TO_IDX["TXNRD1"]] = (1.1 * cov_w + 1.0 * elec_m) * cys_p[11]
-                motif_cols[TARGET_TO_IDX["GPX4_deg"]] = 2.0 * endop
-                motif_cols[TARGET_TO_IDX["SLC7A11"]] = 1.4 * quinaz
-                motif_cols[TARGET_TO_IDX["DHODH"]] = 1.8 * dhodh_m
-                motif_cols[TARGET_TO_IDX["ACSL4"]] = 1.4 * tzd_m
-                motif_cols[TARGET_TO_IDX["HMGCR"]] = 2.1 * statin_st
-                motif_cols[TARGET_TO_IDX["FDX1_Cu"]] = 2.4 * thiocu
+                motif_cols[TARGET_TO_IDX["GPX4_cov"]] = mg[0] * cov_w * cys_p[0]
+                motif_cols[TARGET_TO_IDX["TXNRD1"]] = mg[1] * (0.8 * cov_w + 1.2 * elec_m) * cys_p[11]
+                motif_cols[TARGET_TO_IDX["GPX4_deg"]] = mg[2] * endop
+                motif_cols[TARGET_TO_IDX["SLC7A11"]] = mg[3] * quinaz
+                motif_cols[TARGET_TO_IDX["DHODH"]] = mg[4] * dhodh_m
+                motif_cols[TARGET_TO_IDX["ACSL4"]] = mg[5] * tzd_m
+                motif_cols[TARGET_TO_IDX["HMGCR"]] = mg[6] * statin_st
+                motif_cols[TARGET_TO_IDX["FDX1_Cu"]] = mg[7] * thiocu
                 motif_boost = torch.stack(motif_cols, dim=-1)
 
-            pec50_eff = (pec50 + motif_boost + cell_film_shift).clamp(3.8, 9.6)
-            ec50_uM = torch.pow(10.0, (6.0 - pec50_eff).clamp(-3.6, 2.5))
+            pec50_eff = (pec50 + motif_boost + cell_film_shift).clamp(3.6, 9.5)
+            ec50_uM = torch.pow(10.0, (6.0 - pec50_eff).clamp(-3.5, 2.5))
             dose_exp = (dose_uM.unsqueeze(-1).clamp(min=1e-9)).pow(hill)
             ec50_exp = ec50_uM.pow(hill)
             occ = (dose_exp / (ec50_exp + dose_exp)) * active.unsqueeze(-1)
+            # Gate Cu-ionophore occupancy by bidentate thiocarbonyl coordination + Stage-0.5 SAR channel
+            cu_motif = desc_aligned[:, 11].clamp(min=0.0) if desc is not None else zeros_1
+            p_is_cu = torch.sigmoid(raw[:, TARGET_TO_IDX["FDX1_Cu"]] - 3.2 + 5.0 * cu_motif + 1.2 * sar_feats[:, 12])
+            occ_cols = list(occ.unbind(dim=-1))
+            occ_cols[TARGET_TO_IDX["FDX1_Cu"]] = occ_cols[TARGET_TO_IDX["FDX1_Cu"]] * p_is_cu
+            occ = torch.stack(occ_cols, dim=-1)
 
             rta_motif = desc_aligned[:, 7].clamp(min=0.0) if desc is not None else zeros_1
             chel_motif = desc_aligned[:, 8].clamp(min=0.0) if desc is not None else zeros_1
-            p_is_rta = torch.sigmoid(raw[:, 2 * n_t] - 3.2 + 3.5 * rta_motif)
-            p_is_chel = torch.sigmoid(raw[:, 2 * n_t + 1] - 3.2 + 3.5 * chel_motif)
+            sar_rescuer_logit = sar_raw[:, 2 * self.n_sar_targets - 1].clamp(-4.0, 4.0)
+            p_is_rta = torch.sigmoid(raw[:, 2 * n_t] - 3.0 + 3.0 * rta_motif + 0.65 * sar_rescuer_logit)
+            p_is_chel = torch.sigmoid(raw[:, 2 * n_t + 1] - 3.0 + 3.2 * chel_motif)
             k_rta = p_is_rta * F.softplus(raw[:, 2 * n_t]) * torch.log1p(dose_uM) * active
             k_chelate = p_is_chel * F.softplus(raw[:, 2 * n_t + 1]) * torch.log1p(dose_uM) * active
 
-        k_apop = F.softplus(raw[:, 2 * n_t + 2] - 1.2) * torch.log1p(dose_uM) * active
+        apop_desc_logit = self.desc_apop_head(torch.cat([desc_aligned, sar_feats.detach()], dim=-1)).squeeze(-1)
+        k_apop = F.softplus(raw[:, 2 * n_t + 2] + apop_desc_logit - 1.2) * torch.log1p(dose_uM) * active
         k_necro = F.softplus(raw[:, 2 * n_t + 3] - 1.4) * torch.log1p(dose_uM) * active
 
-        dose_feat = torch.stack([torch.log1p(dose_uM), torch.tanh(0.35 * torch.log10(dose_uM.clamp(min=1e-4)))], dim=-1)
-        z_chem_dosed = (h + self.dose_proj(dose_feat)) * active.unsqueeze(-1)
+        dose_feat = torch.stack(
+            [
+                torch.log1p(dose_uM),
+                torch.tanh(0.45 * torch.log10(dose_uM.clamp(min=1e-4))),
+                (dose_uM / (1.0 + dose_uM)),
+            ],
+            dim=-1,
+        )
+        z_chem_dosed = (h + self.dose_proj(torch.cat([mech_in, dose_feat], dim=-1))) * active.unsqueeze(-1)
         return occ, k_rta, k_chelate, k_apop, k_necro, pec50, z_chem_dosed
 
     @staticmethod

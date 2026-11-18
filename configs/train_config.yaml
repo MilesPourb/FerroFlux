@@ -31,11 +31,11 @@ stoichiometry_and_loci:
 model_variants:
   # FerroFlux-FM v3 SOTA Mechanistic Grey-Box Variant (Stage 0.5 SAR + APHYNITY + 4-Corner Epistasis)
   v3:
-    d_model: 384
-    n_layers: 6
-    n_heads: 6
-    d_ff: 1536
-    n_modules: 128
+    d_model: 256
+    n_layers: 4
+    n_heads: 4
+    d_ff: 688
+    n_modules: 96
     dropout: 0.10
     chem_fp_dim: 3239
     chem_desc_dim: 24

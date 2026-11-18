@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# FerroFlux-FM v3 Full-Convergence SLURM Execution Orchestrator (GPU + 128-Core HighMem Parallel Shards)
-# Zero login-node compute; zero data leakage; 5-seed ensembles across 6 OOD splits, 6 baselines, 8 ablations,
-# and 10 deployment checkpoints (v3_open + v3_academic).
+# FerroFlux-FM v3 Full-Convergence SLURM Execution Orchestrator (128-Core HighMem Parallel Shards)
+# Empirically tuned for Zen 3 EPYC MKL/OpenMP (OMP_WAIT_POLICY=PASSIVE, GOMP_SPINCOUNT=0, OPENBLAS=1)
+# so concurrent workers achieve ~1.1s/step at batch_size=256 with zero spin-wait contention.
 set -euo pipefail
 
 ROOT="/anvil/projects/x-cis261485/Ferroptosis_ML"
@@ -13,6 +13,16 @@ ART_DIR="/home/x-mpourbaghima/.gemini/antigravity/brain/fbdbf148-c361-462e-87f3-
 
 export PYTHONPATH="${ROOT}"
 export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
+export OMP_WAIT_POLICY=PASSIVE
+export GOMP_SPINCOUNT=0
+export KMP_BLOCKTIME=0
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TMPDIR="${SCRATCH_STAGE}/tmp"
+mkdir -p "${TMPDIR}"
+
 cd "${ROOT}"
 
 STAGE_CMD="${1:-submit}"
@@ -28,20 +38,169 @@ SPLITS=(
 
 case "${STAGE_CMD}" in
   prewarm)
-    export OMP_NUM_THREADS=16 MKL_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 NUMEXPR_NUM_THREADS=16
+    export OMP_NUM_THREADS=16 MKL_NUM_THREADS=16
     mkdir -p "${SHARDS_DIR}" "${LOGS_DIR}"
-    echo "[$(date -Is)] Pre-warming Stage-0.5 RDKit multi-scale molecular feature cache..."
+    echo "[$(date -Is)] Pre-warming Stage-0.5 RDKit multi-scale molecular feature & grouped SAR caches (open + academic)..."
     "${PY}" -c '
 from pathlib import Path
 from ferroflux.data.dataset import FerroChemSARPretrainDataset
-ds = FerroChemSARPretrainDataset(data_dir=Path("/anvil/projects/x-cis261485/Ferroptosis_ML/data/processed"), license_track="academic")
-print(f"[PREWARM-OK] Cached {len(ds):,} unique Stage-0.5 SAR molecules.", flush=True)
+p = Path("/anvil/projects/x-cis261485/Ferroptosis_ML/data/processed")
+ds_ac = FerroChemSARPretrainDataset(data_dir=p, license_track="academic")
+ds_op = FerroChemSARPretrainDataset(data_dir=p, license_track="open")
+print(f"[PREWARM-OK] Cached Stage-0.5 SAR molecules: academic={len(ds_ac):,}, open={len(ds_op):,}.", flush=True)
 '
+    ;;
+
+  pilot)
+    export OMP_NUM_THREADS=18 MKL_NUM_THREADS=18
+    PILOT_DIR="${SCRATCH_STAGE}/v3_pilot_shards"
+    PILOT_CKPT="${SCRATCH_STAGE}/v3_pilot_ckpts"
+    mkdir -p "${PILOT_DIR}" "${LOGS_DIR}" "${PILOT_CKPT}/v3_open"
+    rm -rf "${PILOT_DIR}"/*.json "${PILOT_CKPT}"
+    mkdir -p "${PILOT_CKPT}/v3_open"
+    bash "${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh" prewarm
+    PIDS=()
+    for idx in "${!SPLITS[@]}"; do
+      sp="${SPLITS[$idx]}"
+      snum=$((idx + 1))
+      "${PY}" -m ferroflux.training.evaluate_ood_and_ablations \
+        --model-size v3 \
+        --only-track open \
+        --only-split "${sp}" \
+        --skip-ablations \
+        --seeds 101 \
+        --epochs 2 \
+        --sar-epochs 8 \
+        --max-samples-per-shard 200000 \
+        --max-threads 18 \
+        --max-test-per-split 1500 \
+        --shard-out-prefix "${PILOT_DIR}/pilot_open_s${snum}" \
+        > "${LOGS_DIR}/pilot_open_s${snum}.log" 2>&1 &
+      PIDS+=("$!")
+    done
+    "${PY}" -m ferroflux.training.train_curriculum \
+      --data-dir "${ROOT}/data/processed" \
+      --output-dir "${PILOT_CKPT}/v3_open" \
+      --license-track open \
+      --model-size v3 \
+      --precision fp32 \
+      --device auto \
+      --seeds 101 \
+      --epochs-per-stage 3 3 4 3 \
+      --max-steps-per-stage 65 \
+      --batch-size 192 \
+      > "${LOGS_DIR}/pilot_ckpt_open_101.log" 2>&1 &
+    PIDS+=("$!")
+    FAIL=0
+    for pid in "${PIDS[@]}"; do
+      if ! wait "${pid}"; then
+        FAIL=1
+      fi
+    done
+    if [[ "${FAIL}" -ne 0 ]]; then
+      echo "[ERROR] Pilot worker failed!" >&2
+      exit 1
+    fi
+    "${PY}" -c '
+import json, glob
+from pathlib import Path
+from ferroflux.security.quarantine import freeze_checkpoint_sha256
+from ferroflux.validation.stage0_bradbury_blind_eval import run_stage0_blind_evaluation
+
+for p in sorted(glob.glob("/anvil/scratch/x-mpourbaghima/ferroflux_staging/v3_pilot_shards/*_ood.json")):
+    for r in json.loads(Path(p).read_text()):
+        sp = r["ood_split"]
+        rho = r["spearman_rho"]
+        wg = r["within_group_spearman_rho"]
+        ece = r["ece_10bin"]
+        bm = r["best_baseline_model"]
+        br = r["best_baseline_spearman"]
+        dl = r["delta_spearman_vs_best_baseline"]
+        print(f"PILOT OOD {sp:38s}: FF={rho:.4f} (wg={wg:.4f}, ece={ece}) vs {bm}: {br:.4f} [delta={dl:+.4f}]", flush=True)
+
+p_ckpt = Path("/anvil/scratch/x-mpourbaghima/ferroflux_staging/v3_pilot_ckpts")
+p_man = Path("/anvil/scratch/x-mpourbaghima/ferroflux_staging/v3_pilot_manifest.json")
+p_man.unlink(missing_ok=True)
+for pt in sorted(p_ckpt.rglob("*.pt")):
+    freeze_checkpoint_sha256(pt, p_man)
+res_s0 = run_stage0_blind_evaluation(
+    checkpoint_dir=p_ckpt,
+    manifest_path=p_man,
+    license_tracks=["open"],
+    output_tables_dir=Path("/anvil/scratch/x-mpourbaghima/ferroflux_staging/v3_pilot_s0"),
+)
+df_s0 = res_s0[0] if isinstance(res_s0, tuple) else res_s0
+if hasattr(df_s0, "to_dict"):
+    for r in df_s0.to_dict(orient="records"):
+        coh = r["stage0_cohort"]
+        sr = r["spearman_rho"]
+        au = r["auroc"]
+        pp = r["permutation_p"]
+        print(f"PILOT STAGE0 {coh:42s}: rho={sr:.4f} auc={au} p={pp}", flush=True)
+'
+    ;;
+
+  pilot_s134)
+    export OMP_NUM_THREADS=36 MKL_NUM_THREADS=36
+    PILOT_DIR="${SCRATCH_STAGE}/v3_pilot_shards"
+    mkdir -p "${PILOT_DIR}" "${LOGS_DIR}"
+    PIDS=()
+    for idx in 0 2 3; do
+      sp="${SPLITS[$idx]}"
+      snum=$((idx + 1))
+      "${PY}" -m ferroflux.training.evaluate_ood_and_ablations \
+        --model-size v3 \
+        --only-track open \
+        --only-split "${sp}" \
+        --skip-ablations \
+        --seeds 101 \
+        --epochs 2 \
+        --sar-epochs 8 \
+        --max-samples-per-shard 200000 \
+        --max-threads 36 \
+        --max-test-per-split 1500 \
+        --shard-out-prefix "${PILOT_DIR}/pilot_open_s${snum}" \
+        > "${LOGS_DIR}/pilot_open_s${snum}.log" 2>&1 &
+      PIDS+=("$!")
+    done
+    FAIL=0
+    for pid in "${PIDS[@]}"; do
+      if ! wait "${pid}"; then
+        FAIL=1
+      fi
+    done
+    if [[ "${FAIL}" -ne 0 ]]; then
+      echo "[ERROR] pilot_s134 failed!" >&2
+      exit 1
+    fi
+    "${PY}" -c '
+import json, glob
+from pathlib import Path
+for p in sorted(glob.glob("/anvil/scratch/x-mpourbaghima/ferroflux_staging/v3_pilot_shards/*_ood.json")):
+    for r in json.loads(Path(p).read_text()):
+        sp = r["ood_split"]
+        rho = r["spearman_rho"]
+        wg = r["within_group_spearman_rho"]
+        ece = r["ece_10bin"]
+        bm = r["best_baseline_model"]
+        br = r["best_baseline_spearman"]
+        dl = r["delta_spearman_vs_best_baseline"]
+        print(f"PILOT6 OOD {sp:38s}: FF={rho:.4f} (wg={wg:.4f}, ece={ece}) vs {bm}: {br:.4f} [delta={dl:+.4f}]", flush=True)
+'
+    ;;
+
+  submit_pilot_s134)
+    mkdir -p "${LOGS_DIR}"
+    rm -f "${LOGS_DIR}"/slurm_pilot_s134.out
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 00:35:00 \
+      -J ffv3_s134 -o "${LOGS_DIR}/slurm_pilot_s134.out" \
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh pilot_s134"
+    cat "${LOGS_DIR}/slurm_pilot_s134.out"
     ;;
 
   ood_track)
     TRACK="${2:?Usage: ood_track <open|academic>}"
-    export OMP_NUM_THREADS=20 MKL_NUM_THREADS=20 OPENBLAS_NUM_THREADS=20 NUMEXPR_NUM_THREADS=20
+    export OMP_NUM_THREADS=20 MKL_NUM_THREADS=20
     mkdir -p "${SHARDS_DIR}" "${LOGS_DIR}"
     PIDS=()
     for idx in "${!SPLITS[@]}"; do
@@ -54,9 +213,9 @@ print(f"[PREWARM-OK] Cached {len(ds):,} unique Stage-0.5 SAR molecules.", flush=
         --only-split "${sp}" \
         --skip-ablations \
         --seeds 101 202 303 404 505 \
-        --epochs 3 \
+        --epochs 2 \
         --sar-epochs 8 \
-        --max-samples-per-shard 60000 \
+        --max-samples-per-shard 200000 \
         --max-threads 20 \
         --max-test-per-split 1500 \
         --shard-out-prefix "${SHARDS_DIR}/${TRACK}_s${snum}" \
@@ -79,8 +238,8 @@ print(f"[PREWARM-OK] Cached {len(ds):,} unique Stage-0.5 SAR molecules.", flush=
   ablations)
     A_START="${2:-0}"
     A_END="${3:-8}"
-    ABL_THREADS="${OMP_NUM_THREADS:-8}"
-    export OMP_NUM_THREADS="${ABL_THREADS}" MKL_NUM_THREADS="${ABL_THREADS}" OPENBLAS_NUM_THREADS="${ABL_THREADS}" NUMEXPR_NUM_THREADS="${ABL_THREADS}"
+    ABL_THREADS="${OMP_NUM_THREADS:-24}"
+    export OMP_NUM_THREADS="${ABL_THREADS}" MKL_NUM_THREADS="${ABL_THREADS}"
     mkdir -p "${SHARDS_DIR}" "${LOGS_DIR}"
     PIDS=()
     for aidx in $(seq "${A_START}" "${A_END}"); do
@@ -90,9 +249,9 @@ print(f"[PREWARM-OK] Cached {len(ds):,} unique Stage-0.5 SAR molecules.", flush=
         --only-track academic \
         --only-ablation-idx "${aidx}" \
         --seeds 101 202 303 404 505 \
-        --epochs 3 \
+        --epochs 2 \
         --sar-epochs 8 \
-        --max-samples-per-shard 60000 \
+        --max-samples-per-shard 200000 \
         --max-threads "${ABL_THREADS}" \
         --max-test-per-split 1500 \
         --shard-out-prefix "${SHARDS_DIR}/acad_abl${aidx}" \
@@ -114,8 +273,8 @@ print(f"[PREWARM-OK] Cached {len(ds):,} unique Stage-0.5 SAR molecules.", flush=
 
   checkpoints)
     ONLY_TRK="${2:-both}"
-    CKPT_THREADS="${OMP_NUM_THREADS:-6}"
-    export OMP_NUM_THREADS="${CKPT_THREADS}" MKL_NUM_THREADS="${CKPT_THREADS}" OPENBLAS_NUM_THREADS="${CKPT_THREADS}" NUMEXPR_NUM_THREADS="${CKPT_THREADS}"
+    CKPT_THREADS="${OMP_NUM_THREADS:-24}"
+    export OMP_NUM_THREADS="${CKPT_THREADS}" MKL_NUM_THREADS="${CKPT_THREADS}"
     mkdir -p "${ROOT}/checkpoints/v3_clean/v3_open" "${ROOT}/checkpoints/v3_clean/v3_academic" "${LOGS_DIR}"
     PIDS=()
     if [[ "${ONLY_TRK}" == "both" ]]; then
@@ -134,9 +293,9 @@ print(f"[PREWARM-OK] Cached {len(ds):,} unique Stage-0.5 SAR molecules.", flush=
           --precision fp32 \
           --device auto \
           --seeds "${sd}" \
-          --epochs-per-stage 4 4 5 3 \
-          --max-steps-per-stage 160 \
-          --batch-size 128 \
+          --epochs-per-stage 3 3 4 3 \
+          --max-steps-per-stage 65 \
+          --batch-size 192 \
           > "${LOGS_DIR}/ckpt_v3_${trk}_seed${sd}.log" 2>&1 &
         PIDS+=("$!")
       done
@@ -155,7 +314,7 @@ print(f"[PREWARM-OK] Cached {len(ds):,} unique Stage-0.5 SAR molecules.", flush=
     ;;
 
   finalize)
-    export OMP_NUM_THREADS=16 MKL_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 NUMEXPR_NUM_THREADS=16
+    export OMP_NUM_THREADS=16 MKL_NUM_THREADS=16
     echo "[$(date -Is)] 1. Merging OOD & Ablation Shards + Strict-OOS Verification..."
     "${PY}" -m ferroflux.training.evaluate_ood_and_ablations \
       --merge-shards-dir "${SHARDS_DIR}" \
@@ -171,8 +330,9 @@ from ferroflux.security.quarantine import freeze_checkpoint_sha256
 root = Path("/anvil/projects/x-cis261485/Ferroptosis_ML")
 manifest = root / "configs" / "frozen_checkpoints_v3_sha256.json"
 if manifest.exists():
-    manifest.unlink()
-pts = sorted((root / "checkpoints" / "v3_clean").rglob("*.pt"))
+    manifest.chmod(0o664)
+    manifest.write_text("{\"checkpoints\": {}}\n", encoding="utf-8")
+pts = sorted(p for p in (root / "checkpoints" / "v3_clean").rglob("*.pt") if not p.name.startswith("."))
 assert len(pts) == 10, f"Expected 10 v3 checkpoints, found {len(pts)}"
 for p in pts:
     freeze_checkpoint_sha256(p, manifest)
@@ -202,37 +362,115 @@ print(f"[SHA256-V3-LOCK] Frozen {len(pts)} v3 checkpoints into {manifest}", flus
 
     echo "[$(date -Is)] 5. Running Zero-Trust Forensic Verification & Full Pytest Suite..."
     "${PY}" -m ferroflux.audit.verify_v2_remediation
-    "${PY}" -m pytest "${ROOT}/tests" -q
+    "${PY}" -m pytest "${ROOT}/tests" -o cache_dir="${SCRATCH_STAGE}/pytest_cache" -q
     echo "[$(date -Is)] === FERROFLUX-FM V3 PIPELINE 100% COMPLETE ==="
     ;;
 
-  abl_and_ckpt_1node)
-    bash "${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh" prewarm
-    OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 bash "${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh" ablations 0 8 &
-    P_ABL=$!
-    OMP_NUM_THREADS=5 MKL_NUM_THREADS=5 OPENBLAS_NUM_THREADS=5 bash "${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh" checkpoints both &
-    P_CKPT=$!
-    wait "${P_ABL}"
-    wait "${P_CKPT}"
+  submit_pilot)
+    mkdir -p "${LOGS_DIR}"
+    rm -f "${LOGS_DIR}"/slurm_pilot.out
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 00:45:00 \
+      -J ffv3_pilot -o "${LOGS_DIR}/slurm_pilot.out" \
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh pilot"
+    cat "${LOGS_DIR}/slurm_pilot.out"
+    ;;
+
+  submit_wait)
+    mkdir -p "${SHARDS_DIR}" "${LOGS_DIR}"
+    rm -rf "${SHARDS_DIR}"/*.json "${SHARDS_DIR}"/*.npz "${LOGS_DIR}"/*.log "${LOGS_DIR}"/slurm_*.out "${SCRATCH_STAGE}"/v3_pilot*
+    echo "[$(date -Is)] Launching 6 parallel 128-core SLURM compute jobs..."
+    WAIT_PIDS=()
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
+      -J ffv3_ood_open -o "${LOGS_DIR}/slurm_ood_open.out" \
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ood_track open" &
+    WAIT_PIDS+=("$!")
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
+      -J ffv3_ood_acad -o "${LOGS_DIR}/slurm_ood_acad.out" \
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ood_track academic" &
+    WAIT_PIDS+=("$!")
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
+      -J ffv3_abl_0_4 -o "${LOGS_DIR}/slurm_abl_0_4.out" \
+      --wrap="env OMP_NUM_THREADS=24 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ablations 0 4" &
+    WAIT_PIDS+=("$!")
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
+      -J ffv3_abl_5_8 -o "${LOGS_DIR}/slurm_abl_5_8.out" \
+      --wrap="env OMP_NUM_THREADS=28 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ablations 5 8" &
+    WAIT_PIDS+=("$!")
+    sbatch --wait -A cis261485 -p wholenode -N 1 -n 128 -t 02:30:00 \
+      -J ffv3_ckpt_open -o "${LOGS_DIR}/slurm_ckpt_open.out" \
+      --wrap="env OMP_NUM_THREADS=24 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh checkpoints open" &
+    WAIT_PIDS+=("$!")
+    sbatch --wait -A cis261485 -p wholenode -N 1 -n 128 -t 02:30:00 \
+      -J ffv3_ckpt_acad -o "${LOGS_DIR}/slurm_ckpt_acad.out" \
+      --wrap="env OMP_NUM_THREADS=24 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh checkpoints academic" &
+    WAIT_PIDS+=("$!")
+    FAIL_W=0
+    for wpid in "${WAIT_PIDS[@]}"; do
+      if ! wait "${wpid}"; then
+        FAIL_W=1
+      fi
+    done
+    if [[ "${FAIL_W}" -ne 0 ]]; then
+      echo "[ERROR] One or more SLURM compute jobs failed!" >&2
+      exit 1
+    fi
+    echo "[$(date -Is)] All 6 parallel SLURM compute jobs completed cleanly!"
+    ;;
+
+  submit_remaining_wait)
+    mkdir -p "${SHARDS_DIR}" "${LOGS_DIR}"
+    echo "[$(date -Is)] Launching ablations 0..4 (matched codebase) + 10 deployment checkpoints on 2 highmem nodes..."
+    WAIT_PIDS=()
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 02:00:00 \
+      -J ffv3_abl_0_4 -o "${LOGS_DIR}/slurm_abl_0_4.out" \
+      --wrap="env OMP_NUM_THREADS=24 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ablations 0 4" &
+    WAIT_PIDS+=("$!")
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 01:30:00 \
+      -J ffv3_ckpts -o "${LOGS_DIR}/slurm_ckpts_both.out" \
+      --wrap="env OMP_NUM_THREADS=12 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh checkpoints both" &
+    WAIT_PIDS+=("$!")
+    FAIL_R=0
+    for rpid in "${WAIT_PIDS[@]}"; do
+      if ! wait "${rpid}"; then
+        FAIL_R=1
+      fi
+    done
+    if [[ "${FAIL_R}" -ne 0 ]]; then
+      echo "[ERROR] Remaining SLURM jobs failed!" >&2
+      exit 1
+    fi
+    echo "[$(date -Is)] Remaining SLURM jobs completed cleanly; running finalize on highmem node..."
+    sbatch --wait -A cis261485 -p highmem -N 1 -n 64 --mem=250G -t 00:45:00 \
+      -J ffv3_finalize -o "${LOGS_DIR}/slurm_finalize.out" \
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh finalize"
+    cat "${LOGS_DIR}/slurm_finalize.out"
     ;;
 
   submit)
     mkdir -p "${SHARDS_DIR}" "${LOGS_DIR}"
-    rm -f "${SHARDS_DIR}"/*.json "${SHARDS_DIR}"/*.npz
-    J_OOD_OPEN=$(sbatch --parsable -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 01:30:00 \
+    rm -f "${SHARDS_DIR}"/*.json "${SHARDS_DIR}"/*.npz "${LOGS_DIR}"/*.log
+    J_PRE=$(sbatch --parsable -A cis261485 -p wholenode -N 1 -n 128 -t 00:30:00 \
+      -J ffv3_prewarm -o "${LOGS_DIR}/slurm_prewarm_%j.out" \
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh prewarm")
+    J_OOD_OPEN=$(sbatch --parsable --dependency=afterok:${J_PRE} -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
       -J ffv3_ood_open -o "${LOGS_DIR}/slurm_ood_open_%j.out" \
-      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh prewarm && bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ood_track open")
-    J_OOD_ACAD=$(sbatch --parsable -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 01:30:00 \
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ood_track open")
+    J_OOD_ACAD=$(sbatch --parsable --dependency=afterok:${J_PRE} -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
       -J ffv3_ood_acad -o "${LOGS_DIR}/slurm_ood_acad_%j.out" \
-      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh prewarm && bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ood_track academic")
-    J_ABL_CKPT=$(sbatch --parsable -A cis261485 -p highmem -N 1 -n 128 --mem=800G -t 01:30:00 \
-      -J ffv3_abl_ckpt -o "${LOGS_DIR}/slurm_abl_ckpt_%j.out" \
-      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh abl_and_ckpt_1node")
-    J_FIN=$(sbatch --parsable --dependency=afterok:${J_OOD_OPEN}:${J_OOD_ACAD}:${J_ABL_CKPT} \
-      -A cis261485 -p highmem -N 1 -n 32 --mem=160G -t 00:45:00 \
-      -J ffv3_finalize -o "${LOGS_DIR}/slurm_finalize_%j.out" \
-      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh finalize")
-    echo "Submitted 4-job highmem DAG: ood_open=${J_OOD_OPEN}, ood_acad=${J_OOD_ACAD}, abl_ckpt=${J_ABL_CKPT} -> finalize=${J_FIN}"
+      --wrap="bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ood_track academic")
+    J_ABL1=$(sbatch --parsable --dependency=afterok:${J_PRE} -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
+      -J ffv3_abl_0_4 -o "${LOGS_DIR}/slurm_abl_0_4_%j.out" \
+      --wrap="env OMP_NUM_THREADS=24 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ablations 0 4")
+    J_ABL2=$(sbatch --parsable --dependency=afterok:${J_PRE} -A cis261485 -p highmem -N 1 -n 128 --mem=600G -t 03:00:00 \
+      -J ffv3_abl_5_8 -o "${LOGS_DIR}/slurm_abl_5_8_%j.out" \
+      --wrap="env OMP_NUM_THREADS=28 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh ablations 5 8")
+    J_CKPT_OP=$(sbatch --parsable --dependency=afterok:${J_PRE} -A cis261485 -p wholenode -N 1 -n 128 -t 02:30:00 \
+      -J ffv3_ckpt_open -o "${LOGS_DIR}/slurm_ckpt_open_%j.out" \
+      --wrap="env OMP_NUM_THREADS=24 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh checkpoints open")
+    J_CKPT_AC=$(sbatch --parsable --dependency=afterok:${J_PRE} -A cis261485 -p wholenode -N 1 -n 128 -t 02:30:00 \
+      -J ffv3_ckpt_acad -o "${LOGS_DIR}/slurm_ckpt_acad_%j.out" \
+      --wrap="env OMP_NUM_THREADS=24 bash ${ROOT}/scripts/run_v3_slurm_gpu_or_highmem.sh checkpoints academic")
+    echo "Submitted prewarm=${J_PRE} + 6 parallel compute jobs: ood_open=${J_OOD_OPEN}, ood_acad=${J_OOD_ACAD}, abl1=${J_ABL1}, abl2=${J_ABL2}, ckpt_open=${J_CKPT_OP}, ckpt_acad=${J_CKPT_AC}"
     ;;
 
   *)

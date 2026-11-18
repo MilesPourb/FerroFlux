@@ -109,6 +109,7 @@ class DifferentiableRankAndCorrelationLoss(nn.Module):
         pred: torch.Tensor,
         target: torch.Tensor | None,
         mask: torch.Tensor | None = None,
+        group_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, bool]:
         huber_val, has_valid = _masked_huber(pred, target, mask=mask, delta=self.huber_delta)
         if not has_valid or target is None:
@@ -126,9 +127,12 @@ class DifferentiableRankAndCorrelationLoss(nn.Module):
 
         pv = p_f[m_f]
         tv = t_f[m_f]
+        gv = group_ids.to(device=pred.device).reshape(-1)[m_f] if isinstance(group_ids, torch.Tensor) and group_ids.numel() == p_f.numel() else None
         if pv.numel() > 256:
             pv = pv[:256]
             tv = tv[:256]
+            if gv is not None:
+                gv = gv[:256]
 
         t_centered = tv - tv.mean()
         t_norm = t_centered.norm()
@@ -140,6 +144,25 @@ class DifferentiableRankAndCorrelationLoss(nn.Module):
         pearson_r = (p_centered * t_centered).sum() / (p_norm * t_norm + 1e-6)
         corr_loss = (1.0 - pearson_r.clamp(-1.0, 1.0)).to(pred.dtype)
 
+        wg_corr_loss = huber_val.new_zeros(())
+        if gv is not None:
+            uniq_g, counts_g = torch.unique(gv, return_counts=True)
+            valid_g = uniq_g[(counts_g >= 5) & (uniq_g >= 0)]
+            if valid_g.numel() > 0:
+                wg_terms: list[torch.Tensor] = []
+                for gid in valid_g[:16].tolist():
+                    mg = gv == gid
+                    tg = tv[mg]
+                    tgc = tg - tg.mean()
+                    tgn = tgc.norm()
+                    if tgn.item() > 1e-4:
+                        pg = pv[mg]
+                        pgc = pg - pg.mean()
+                        rg = (pgc * tgc).sum() / ((pgc.pow(2).sum() + 1e-6).sqrt() * tgn + 1e-6)
+                        wg_terms.append(1.0 - rg.clamp(-1.0, 1.0))
+                if wg_terms:
+                    wg_corr_loss = torch.stack(wg_terms).mean().to(pred.dtype)
+
         diff_t = tv.unsqueeze(1) - tv.unsqueeze(0)
         pair_valid = diff_t.abs() > self.margin_min
         if bool(pair_valid.any().item()):
@@ -150,22 +173,22 @@ class DifferentiableRankAndCorrelationLoss(nn.Module):
         else:
             rank_loss = huber_val.new_zeros(())
 
-        total = huber_val + self.corr_weight * corr_loss + self.rank_weight * rank_loss
+        total = huber_val + self.corr_weight * corr_loss + 0.25 * wg_corr_loss + self.rank_weight * rank_loss
         return total, True
 
 
 class FerroFluxCurriculumLoss(nn.Module):
     """Unified 4-stage mechanistic + differentiable ranking & APHYNITY curriculum loss (v3)."""
 
-    def __init__(self, huber_delta: float = 1.0, aphynity_lambda: float = 1e-3) -> None:
+    def __init__(self, huber_delta: float = 1.0, aphynity_lambda: float = 2e-4) -> None:
         super().__init__()
         self.huber_delta = float(huber_delta)
         self.aphynity_lambda = float(aphynity_lambda)
         self.viab_rank_loss = DifferentiableRankAndCorrelationLoss(
-            huber_delta=0.25, corr_weight=0.35, rank_weight=0.40, margin_min=0.05, rank_scale=8.0
+            huber_delta=0.20, corr_weight=0.45, rank_weight=0.45, margin_min=0.04, rank_scale=10.0
         )
         self.chronos_rank_loss = DifferentiableRankAndCorrelationLoss(
-            huber_delta=0.75, corr_weight=0.40, rank_weight=0.35, margin_min=0.08, rank_scale=4.0
+            huber_delta=0.65, corr_weight=0.50, rank_weight=0.40, margin_min=0.06, rank_scale=5.0
         )
 
     def forward(
@@ -192,16 +215,58 @@ class FerroFluxCurriculumLoss(nn.Module):
             rec_f = outputs["mgm_recon"].float()
             tgt_f = gene_expr.to(device=rec_f.device).float()
             if rec_f.shape == tgt_f.shape:
-                rc = rec_f - rec_f.mean(dim=0, keepdim=True)
-                tc = tgt_f - tgt_f.mean(dim=0, keepdim=True)
-                t_std = tc.pow(2).sum(dim=0)
-                active_g = t_std > 1e-4
-                if bool(active_g.any().item()):
-                    r_g = (rc[:, active_g] * tc[:, active_g]).sum(dim=0) / (
-                        (rc[:, active_g].pow(2).sum(dim=0) + 1e-6).sqrt() * (t_std[active_g] + 1e-6).sqrt()
-                    )
-                    mgm_corr = (1.0 - r_g.mean()).to(mgm_huber.dtype) * 0.35
+                if isinstance(mgm_mask, torch.Tensor) and mgm_mask.shape == rec_f.shape:
+                    m_w = (mgm_mask.to(device=rec_f.device).float() > 0.5).float()
+                    col_n = m_w.sum(dim=0, keepdim=True)
+                    valid_cols = col_n.squeeze(0) >= 4
+                    if bool(valid_cols.any().item()):
+                        rm = (rec_f[:, valid_cols] * m_w[:, valid_cols]).sum(dim=0, keepdim=True) / col_n[:, valid_cols]
+                        tm = (tgt_f[:, valid_cols] * m_w[:, valid_cols]).sum(dim=0, keepdim=True) / col_n[:, valid_cols]
+                        rc = (rec_f[:, valid_cols] - rm) * m_w[:, valid_cols]
+                        tc = (tgt_f[:, valid_cols] - tm) * m_w[:, valid_cols]
+                        t_std = tc.pow(2).sum(dim=0)
+                        act_c = t_std > 1e-4
+                        if bool(act_c.any().item()):
+                            r_g = (rc[:, act_c] * tc[:, act_c]).sum(dim=0) / (
+                                (rc[:, act_c].pow(2).sum(dim=0) + 1e-6).sqrt() * (t_std[act_c] + 1e-6).sqrt()
+                            )
+                            mgm_corr = (1.0 - r_g.mean()).to(mgm_huber.dtype) * 0.45
+                else:
+                    rc = rec_f - rec_f.mean(dim=0, keepdim=True)
+                    tc = tgt_f - tgt_f.mean(dim=0, keepdim=True)
+                    t_std = tc.pow(2).sum(dim=0)
+                    active_g = t_std > 1e-4
+                    if bool(active_g.any().item()):
+                        r_g = (rc[:, active_g] * tc[:, active_g]).sum(dim=0) / (
+                            (rc[:, active_g].pow(2).sum(dim=0) + 1e-6).sqrt() * (t_std[active_g] + 1e-6).sqrt()
+                        )
+                        mgm_corr = (1.0 - r_g.mean()).to(mgm_huber.dtype) * 0.35
         mgm_loss = mgm_huber + mgm_corr
+
+        imm_loss = mgm_huber.new_zeros(())
+        if "gt_immunogenic_target" in outputs and "immunogenic_pathways" in outputs:
+            gt_it = outputs["gt_immunogenic_target"]
+            gt_im = outputs.get("gt_immunogenic_mask")
+            imm_huber, has_imm = _masked_huber(outputs["immunogenic_pathways"], gt_it, mask=gt_im, delta=0.75)
+            imm_corr = mgm_huber.new_zeros(())
+            if has_imm and outputs["immunogenic_pathways"].shape[0] >= 6:
+                ip_f = outputs["immunogenic_pathways"].float()
+                it_f = gt_it.float()
+                im_f = (gt_im.float() > 0.5).float() if isinstance(gt_im, torch.Tensor) else torch.ones_like(ip_f)
+                corr_list: list[torch.Tensor] = []
+                for c_k in range(ip_f.shape[-1]):
+                    mk = im_f[:, c_k] > 0.5
+                    if int(mk.sum().item()) >= 5:
+                        tk = it_f[mk, c_k]
+                        tkc = tk - tk.mean()
+                        if float(tkc.pow(2).sum().item()) > 1e-4:
+                            pk = ip_f[mk, c_k]
+                            pkc = pk - pk.mean()
+                            rk = (pkc * tkc).sum() / ((pkc.pow(2).sum() + 1e-6).sqrt() * (tkc.pow(2).sum() + 1e-6).sqrt())
+                            corr_list.append(1.0 - rk.clamp(-1.0, 1.0))
+                if corr_list:
+                    imm_corr = 0.35 * torch.stack(corr_list).mean().to(mgm_huber.dtype)
+            imm_loss = imm_huber + imm_corr
 
         flux_reg = 1e-4 * outputs["fluxes"].pow(2).mean()
         aphynity_reg = (
@@ -238,15 +303,21 @@ class FerroFluxCurriculumLoss(nn.Module):
                 mask=batch.get("metab_anchor_mask", batch.get("metabolomics_mask")),
                 delta=self.huber_delta,
             )
-            total = 1.0 * mgm_loss + 1.0 * l_prot + 1.5 * l_metab + 0.1 * flux_reg + phys_reg
-            components.update({"prot_anchor_loss": l_prot, "metab_anchor_loss": l_metab})
+            total = 1.0 * mgm_loss + 0.65 * imm_loss + 1.0 * l_prot + 1.5 * l_metab + 0.1 * flux_reg + phys_reg
+            components.update({"prot_anchor_loss": l_prot, "metab_anchor_loss": l_metab, "imm_loss": imm_loss})
 
         elif stage == 2:
-            surv_w = batch.get("survivorship_weight")
+            raw_sw = batch.get("survivorship_weight")
+            if bool(outputs.get("ablate_survivorship_flag", False)) or not isinstance(raw_sw, torch.Tensor):
+                surv_w = None
+            else:
+                sw_c = torch.nan_to_num(raw_sw.float(), nan=1.0).clamp(1.0, 6.0)
+                surv_w = sw_c / sw_c.mean().clamp(min=1e-4)
             l_chronos, _ = self.chronos_rank_loss(
                 outputs["chronos_pred"],
                 batch.get("chronos_target"),
                 mask=batch.get("chronos_mask"),
+                group_ids=batch.get("group_id_int"),
             )
             l_de, has_de = _masked_huber(
                 outputs["delta_expr_pred"],
@@ -277,6 +348,7 @@ class FerroFluxCurriculumLoss(nn.Module):
                 outputs["viability_pred"],
                 batch.get("viability_target", batch.get("viability")),
                 mask=batch.get("viability_mask"),
+                group_ids=batch.get("group_id_int"),
             )
             l_haz, _ = _masked_huber(
                 outputs["hazards"],
@@ -300,13 +372,14 @@ class FerroFluxCurriculumLoss(nn.Module):
                 outputs["chronos_pred"],
                 batch.get("chronos_target"),
                 mask=batch.get("chronos_mask"),
+                group_ids=batch.get("group_id_int"),
             )
             total = (
                 0.15 * mgm_loss
-                + 1.5 * l_viab
-                + 1.2 * l_haz
-                + 2.0 * l_rescue
-                + 0.8 * l_syn
+                + 1.6 * l_viab
+                + 0.75 * l_haz
+                + 0.8 * l_rescue
+                + 0.6 * l_syn
                 + 1.0 * l_chr3
                 + 0.1 * flux_reg
                 + phys_reg
@@ -336,14 +409,17 @@ class FerroFluxCurriculumLoss(nn.Module):
                 outputs["viability_pred"],
                 batch.get("viability_target"),
                 mask=batch.get("viability_mask"),
+                group_ids=batch.get("group_id_int"),
             )
             l_chr4, _ = self.chronos_rank_loss(
                 outputs["chronos_pred"],
                 batch.get("chronos_target"),
                 mask=batch.get("chronos_mask"),
+                group_ids=batch.get("group_id_int"),
             )
             total = (
-                0.35 * mgm_loss
+                0.45 * mgm_loss
+                + 0.65 * imm_loss
                 + 1.2 * l_oxy
                 + 0.8 * l_icb
                 + 1.4 * l_viab4

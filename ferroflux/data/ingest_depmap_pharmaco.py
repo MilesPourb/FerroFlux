@@ -672,7 +672,13 @@ def canonicalize_compound(name: str, raw_smiles: str = "") -> dict[str, Any] | N
                     break
 
     smi = str(raw_smiles).strip() if raw_smiles and str(raw_smiles).strip().lower() not in ("nan", "none", "") else ""
-    if not smi and matched_meta:
+    if smi and any(sep in smi for sep in (",", ";", "|")):
+        for tok in re.split(r"[,;|]+", smi):
+            cand_tok = tok.strip()
+            if cand_tok and Chem.MolFromSmiles(cand_tok) is not None:
+                smi = cand_tok
+                break
+    if (not smi or Chem.MolFromSmiles(smi) is None) and matched_meta:
         smi = matched_meta["smiles"]
 
     if matched_meta is None:
