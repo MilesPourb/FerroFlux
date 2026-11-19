@@ -242,6 +242,8 @@ class GeneToModulePerceiverTrunk(nn.Module):
             nn.Linear(self.d_model, self.d_model),
         )
         self.cis_fusion = nn.Linear(self.d_model, self.d_model)
+        nn.init.normal_(self.cis_fusion.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.cis_fusion.bias)
 
         self.blocks = nn.ModuleList(
             [RoPESwiGLUBlock(self.d_model, self.n_heads, dropout=dropout) for _ in range(self.n_layers)]
@@ -254,6 +256,11 @@ class GeneToModulePerceiverTrunk(nn.Module):
             "anchor_gene_idx",
             torch.tensor(anchor_gene_indices[: len(ANCHOR_28_PROTEINS)], dtype=torch.long),
             persistent=False,
+        )
+        self.register_buffer(
+            "anchor_mrna_ref",
+            torch.full((len(ANCHOR_28_PROTEINS),), 1.5, dtype=torch.float32),
+            persistent=True,
         )
 
         self.protein_anchor_head = nn.Sequential(
@@ -425,6 +432,7 @@ class GeneToModulePerceiverTrunk(nn.Module):
             m0_hat = F.softplus(m0_hat_log) + 0.05
 
         mgm_recon = self.decode_expr(z_cell, n_out_genes=orig_g)
+        mgm_recon_rel = mgm_recon - mgm_recon.mean(dim=-1, keepdim=True)
 
         return {
             "z_modules": z_modules,
@@ -436,6 +444,7 @@ class GeneToModulePerceiverTrunk(nn.Module):
             "m0_hat": m0_hat,
             "m0_hat_log": m0_hat_log,
             "mgm_recon": mgm_recon,
+            "mgm_recon_rel": mgm_recon_rel,
         }
 
 

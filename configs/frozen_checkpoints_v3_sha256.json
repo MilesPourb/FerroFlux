@@ -1,144 +1,144 @@
 {
   "checkpoints": {
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed101.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:52.997537+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.297991+00:00",
       "name": "ferroflux_v3_academic_seed101.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed101.pt",
-      "sha256": "6550199290d828cdc4b1eab3c4d303ad25536ec334bafe37c100ec33809d2f7d",
-      "size_bytes": 32075079
+      "sha256": "9535b07877e3c0244160dc270ae82dad981835baa2a33ae71ca04409dd50122a",
+      "size_bytes": 43434427
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed202.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.052014+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.370528+00:00",
       "name": "ferroflux_v3_academic_seed202.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed202.pt",
-      "sha256": "c2e9abcb7ba6ec9d777c3b99b1f69aba6470482b6dd8731436fed9411930e9f1",
-      "size_bytes": 32075079
+      "sha256": "ea6f83d5dfb48d2f042f42bd619e38595e1d78fab646393692329d8a9572863c",
+      "size_bytes": 43434427
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed303.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.105076+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.460476+00:00",
       "name": "ferroflux_v3_academic_seed303.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed303.pt",
-      "sha256": "e40f30eb54e3d90c361d4494b43aac2ca2502c7522752662f412dee6273750ac",
-      "size_bytes": 32075079
+      "sha256": "4f4a43962437d9949e0657224d9b5661eda4790dd7f0be055818b63823d885c9",
+      "size_bytes": 43434491
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed404.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.163830+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.528540+00:00",
       "name": "ferroflux_v3_academic_seed404.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed404.pt",
-      "sha256": "f3b2d51b02a8af0e3e41578c2d9436273d6c8715aa59f845c58f4b3a5e623c8e",
-      "size_bytes": 32075079
+      "sha256": "ad08c12d1bb6d07a9da8cff97d2ee7488773c8fd95168397e887416b2978f0f0",
+      "size_bytes": 43434491
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed505.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.214583+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.649349+00:00",
       "name": "ferroflux_v3_academic_seed505.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed505.pt",
-      "sha256": "f482694330c697b0fab885372a63eea5296ea9ad51c61bc974225e6e570547cb",
-      "size_bytes": 32075079
+      "sha256": "5216b53b2736b3cc3fe9f2c889ca59fe9924a2f4c83b0d0ce528d8e4b7ed0e77",
+      "size_bytes": 43434491
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed101.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.269874+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.747258+00:00",
       "name": "ferroflux_v3_open_seed101.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed101.pt",
-      "sha256": "98611eb098ebd4a0f0adedb60b20fb9ae348325a56f7cbf48c050641f3ef9fda",
-      "size_bytes": 32075079
+      "sha256": "a8fae1a320540ef4206dc03873778a5af83504f3c37d4c88f9433ddbae9bec30",
+      "size_bytes": 43434427
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed202.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.329970+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.843448+00:00",
       "name": "ferroflux_v3_open_seed202.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed202.pt",
-      "sha256": "06db3bd1e41fb3b8c4356d56e1e6aa827d96b8a01ad7a4cff40261e28d383a1f",
-      "size_bytes": 32075079
+      "sha256": "a53bb983e3a7ef8fa00e2621d793a733f9a7dca9a393f1a72f6d72ab5090c0ac",
+      "size_bytes": 43434427
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed303.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.385245+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.916564+00:00",
       "name": "ferroflux_v3_open_seed303.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed303.pt",
-      "sha256": "6eca63dfbe61d298a26fe2ca1b0a66ae6eb7dbf0faa73daaba8dc4d48c8bbf4b",
-      "size_bytes": 32075079
+      "sha256": "b26e1d4c25367a42c82477803311c8434da282eb9c05631dd7b5daa8cce66c99",
+      "size_bytes": 43434427
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed404.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.442122+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.993873+00:00",
       "name": "ferroflux_v3_open_seed404.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed404.pt",
-      "sha256": "cae94effd044eb9f3d24b805795a8e3ee8c4a7c16d6f22a7ef45ef230b20c66e",
-      "size_bytes": 32075079
+      "sha256": "9f22bbde909c031970821f8c46e9dad0584a0eea8df052bc445b954c886f8f66",
+      "size_bytes": 43434427
     },
     "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed505.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.508827+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:39.061886+00:00",
       "name": "ferroflux_v3_open_seed505.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed505.pt",
-      "sha256": "31cdeeb2bfd5d6cdcecd1826abd04613bba4e1f5db8a12bdff0925205dd3c08c",
-      "size_bytes": 32075079
+      "sha256": "6fe53b9d896c5ae2c85fb186054d38209a3fc39506801d66fc64e2875513c090",
+      "size_bytes": 43434427
     },
     "ferroflux_v3_academic_seed101.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:52.997537+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.297991+00:00",
       "name": "ferroflux_v3_academic_seed101.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed101.pt",
-      "sha256": "6550199290d828cdc4b1eab3c4d303ad25536ec334bafe37c100ec33809d2f7d",
-      "size_bytes": 32075079
+      "sha256": "9535b07877e3c0244160dc270ae82dad981835baa2a33ae71ca04409dd50122a",
+      "size_bytes": 43434427
     },
     "ferroflux_v3_academic_seed202.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.052014+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.370528+00:00",
       "name": "ferroflux_v3_academic_seed202.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed202.pt",
-      "sha256": "c2e9abcb7ba6ec9d777c3b99b1f69aba6470482b6dd8731436fed9411930e9f1",
-      "size_bytes": 32075079
+      "sha256": "ea6f83d5dfb48d2f042f42bd619e38595e1d78fab646393692329d8a9572863c",
+      "size_bytes": 43434427
     },
     "ferroflux_v3_academic_seed303.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.105076+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.460476+00:00",
       "name": "ferroflux_v3_academic_seed303.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed303.pt",
-      "sha256": "e40f30eb54e3d90c361d4494b43aac2ca2502c7522752662f412dee6273750ac",
-      "size_bytes": 32075079
+      "sha256": "4f4a43962437d9949e0657224d9b5661eda4790dd7f0be055818b63823d885c9",
+      "size_bytes": 43434491
     },
     "ferroflux_v3_academic_seed404.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.163830+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.528540+00:00",
       "name": "ferroflux_v3_academic_seed404.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed404.pt",
-      "sha256": "f3b2d51b02a8af0e3e41578c2d9436273d6c8715aa59f845c58f4b3a5e623c8e",
-      "size_bytes": 32075079
+      "sha256": "ad08c12d1bb6d07a9da8cff97d2ee7488773c8fd95168397e887416b2978f0f0",
+      "size_bytes": 43434491
     },
     "ferroflux_v3_academic_seed505.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.214583+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.649349+00:00",
       "name": "ferroflux_v3_academic_seed505.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_academic/ferroflux_v3_academic_seed505.pt",
-      "sha256": "f482694330c697b0fab885372a63eea5296ea9ad51c61bc974225e6e570547cb",
-      "size_bytes": 32075079
+      "sha256": "5216b53b2736b3cc3fe9f2c889ca59fe9924a2f4c83b0d0ce528d8e4b7ed0e77",
+      "size_bytes": 43434491
     },
     "ferroflux_v3_open_seed101.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.269874+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.747258+00:00",
       "name": "ferroflux_v3_open_seed101.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed101.pt",
-      "sha256": "98611eb098ebd4a0f0adedb60b20fb9ae348325a56f7cbf48c050641f3ef9fda",
-      "size_bytes": 32075079
+      "sha256": "a8fae1a320540ef4206dc03873778a5af83504f3c37d4c88f9433ddbae9bec30",
+      "size_bytes": 43434427
     },
     "ferroflux_v3_open_seed202.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.329970+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.843448+00:00",
       "name": "ferroflux_v3_open_seed202.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed202.pt",
-      "sha256": "06db3bd1e41fb3b8c4356d56e1e6aa827d96b8a01ad7a4cff40261e28d383a1f",
-      "size_bytes": 32075079
+      "sha256": "a53bb983e3a7ef8fa00e2621d793a733f9a7dca9a393f1a72f6d72ab5090c0ac",
+      "size_bytes": 43434427
     },
     "ferroflux_v3_open_seed303.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.385245+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.916564+00:00",
       "name": "ferroflux_v3_open_seed303.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed303.pt",
-      "sha256": "6eca63dfbe61d298a26fe2ca1b0a66ae6eb7dbf0faa73daaba8dc4d48c8bbf4b",
-      "size_bytes": 32075079
+      "sha256": "b26e1d4c25367a42c82477803311c8434da282eb9c05631dd7b5daa8cce66c99",
+      "size_bytes": 43434427
     },
     "ferroflux_v3_open_seed404.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.442122+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:38.993873+00:00",
       "name": "ferroflux_v3_open_seed404.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed404.pt",
-      "sha256": "cae94effd044eb9f3d24b805795a8e3ee8c4a7c16d6f22a7ef45ef230b20c66e",
-      "size_bytes": 32075079
+      "sha256": "9f22bbde909c031970821f8c46e9dad0584a0eea8df052bc445b954c886f8f66",
+      "size_bytes": 43434427
     },
     "ferroflux_v3_open_seed505.pt": {
-      "frozen_at_utc": "2026-11-18T12:30:53.508827+00:00",
+      "frozen_at_utc": "2026-11-19T08:37:39.061886+00:00",
       "name": "ferroflux_v3_open_seed505.pt",
       "path": "/anvil/projects/x-cis261485/Ferroptosis_ML/checkpoints/v3_clean/v3_open/ferroflux_v3_open_seed505.pt",
-      "sha256": "31cdeeb2bfd5d6cdcecd1826abd04613bba4e1f5db8a12bdff0925205dd3c08c",
-      "size_bytes": 32075079
+      "sha256": "6fe53b9d896c5ae2c85fb186054d38209a3fc39506801d66fc64e2875513c090",
+      "size_bytes": 43434427
     }
   }
 }

@@ -18,6 +18,7 @@ Upgrades in v3:
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -235,6 +236,7 @@ class CompositionalPerturbationOperator(nn.Module):
         self.d_latent = int(d_latent)
         self.d_cell = int(d_cell)
         self.ablate_chem_prior = bool(ablate_chem_prior)
+        self.ablate_sec46_gate: bool = False
         self.n_sar_targets = N_SAR_TARGETS
         d_desc_hid = max(32, self.d_latent // 2)
 
@@ -265,6 +267,42 @@ class CompositionalPerturbationOperator(nn.Module):
         # Stage-0.5 Biochemical & Phenotypic SAR Multi-Task Pretraining Head (`21` potency + `21` binary logits)
         self.sar_pretrain_head = nn.Linear(self.d_latent, 2 * self.n_sar_targets)
         self.raw_sar_cell_offset = nn.Parameter(torch.tensor(0.20))
+
+        # Frozen Stage-0.5 SAR Anchor Snapshot (prevents catastrophic forgetting on 39-89 cellular drugs)
+        self.sar_anchor_fp_proj = copy.deepcopy(self.chem_fp_proj).requires_grad_(False)
+        self.sar_anchor_desc_proj = copy.deepcopy(self.chem_desc_proj).requires_grad_(False)
+        self.sar_anchor_in_proj = copy.deepcopy(self.chem_in_proj).requires_grad_(False)
+        self.sar_anchor_blocks = copy.deepcopy(self.chem_blocks).requires_grad_(False)
+        self.sar_anchor_out_norm = copy.deepcopy(self.chem_out_norm).requires_grad_(False)
+        self.sar_anchor_head = copy.deepcopy(self.sar_pretrain_head).requires_grad_(False)
+        self.register_buffer("has_sar_snapshot", torch.tensor(0, dtype=torch.int64), persistent=True)
+
+        # Factored Scaffold-Invariant (Desc + MACCS + Full Frozen SAR + Dose) + Shared-ECFP Dosed Chemical Encoder
+        self.ecfp_sub_dim = min(3072, self.chem_fp_dim)
+        self.maccs_sub_dim = max(0, self.chem_fp_dim - 3072)
+        self.sar_snap_dim = 2 * self.n_sar_targets + self.d_latent
+        self.scaf_dense_dim = self.chem_desc_dim + self.maccs_sub_dim + self.sar_snap_dim + 4 + self.chem_desc_dim
+        self.register_buffer("chem_dense_mean", torch.zeros(self.scaf_dense_dim, dtype=torch.float32), persistent=True)
+        self.register_buffer("chem_dense_scale", torch.ones(self.scaf_dense_dim, dtype=torch.float32), persistent=True)
+        self.register_buffer("shared_ecfp_mask", torch.ones(self.ecfp_sub_dim, dtype=torch.float32), persistent=True)
+
+        d_ecfp_br = max(64, self.d_latent // 2)
+        self.chem_scaffold_inv_enc = nn.Sequential(
+            nn.Linear(self.scaf_dense_dim, self.d_latent),
+            nn.LayerNorm(self.d_latent),
+            nn.SiLU(),
+            nn.Dropout(0.15),
+            nn.Linear(self.d_latent, self.d_latent),
+            nn.LayerNorm(self.d_latent),
+            nn.SiLU(),
+        )
+        self.chem_shared_ecfp_enc = nn.Sequential(
+            nn.Dropout(0.35),
+            nn.Linear(self.ecfp_sub_dim, d_ecfp_br),
+            nn.LayerNorm(d_ecfp_br),
+            nn.SiLU(),
+        )
+        self.chem_scaffold_fuse = nn.Linear(self.d_latent + d_ecfp_br, self.d_latent)
 
         mech_in_dim = self.d_latent + 2 * self.n_sar_targets + self.chem_desc_dim
         self.chem_mech_head = nn.Linear(mech_in_dim, 2 * len(CHEM_14_TARGETS) + 4)
@@ -304,6 +342,88 @@ class CompositionalPerturbationOperator(nn.Module):
             persistent=False,
         )
 
+    @torch.no_grad()
+    def snapshot_stage05_sar_anchor(self) -> None:
+        """Freeze a clean copy of the Stage-0.5 SAR encoder so cellular fine-tuning never forgets unseen chemotypes."""
+        if self.ablate_chem_prior:
+            self.has_sar_snapshot.zero_()
+            return
+        self.sar_anchor_fp_proj.load_state_dict(self.chem_fp_proj.state_dict())
+        self.sar_anchor_desc_proj.load_state_dict(self.chem_desc_proj.state_dict())
+        self.sar_anchor_in_proj.load_state_dict(self.chem_in_proj.state_dict())
+        self.sar_anchor_blocks.load_state_dict(self.chem_blocks.state_dict())
+        self.sar_anchor_out_norm.load_state_dict(self.chem_out_norm.state_dict())
+        self.sar_anchor_head.load_state_dict(self.sar_pretrain_head.state_dict())
+        for mod in (
+            self.sar_anchor_fp_proj,
+            self.sar_anchor_desc_proj,
+            self.sar_anchor_in_proj,
+            self.sar_anchor_blocks,
+            self.sar_anchor_out_norm,
+            self.sar_anchor_head,
+        ):
+            mod.requires_grad_(False)
+            mod.eval()
+        self.has_sar_snapshot.fill_(1)
+
+    @torch.no_grad()
+    def compute_frozen_sar_vector(self, fp_aligned: torch.Tensor, desc_aligned: torch.Tensor) -> torch.Tensor:
+        """Return `[B, sar_snap_dim]` frozen Stage-0.5 SAR representation (`0` when SAR/ChemPrior is ablated)."""
+        bsz = fp_aligned.shape[0]
+        if self.ablate_chem_prior or int(self.has_sar_snapshot.item()) == 0:
+            return torch.zeros(bsz, self.sar_snap_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+        h_s = self.sar_anchor_in_proj(
+            torch.cat([self.sar_anchor_fp_proj(fp_aligned), self.sar_anchor_desc_proj(desc_aligned)], dim=-1)
+        )
+        for blk in self.sar_anchor_blocks:
+            h_s = blk(h_s)
+        h_s = self.sar_anchor_out_norm(h_s)
+        sar_r = self.sar_anchor_head(h_s)
+        sar_sig = torch.sigmoid(sar_r)
+        return torch.cat([sar_sig, 0.25 * h_s], dim=-1)
+
+    def build_raw_chem_dense_features(
+        self,
+        fp_aligned: torch.Tensor,
+        desc_aligned: torch.Tensor,
+        dose_uM: torch.Tensor,
+        dose_log10: torch.Tensor,
+    ) -> torch.Tensor:
+        """Construct `[B, scaf_dense_dim]` scaffold-generalizing chemical + SAR + dose vector."""
+        bsz = fp_aligned.shape[0]
+        if self.ablate_chem_prior or self.ablate_sec46_gate:
+            maccs = torch.zeros(bsz, self.maccs_sub_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+            sar_vec = torch.zeros(bsz, self.sar_snap_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+        else:
+            maccs = (
+                fp_aligned[:, 3072 : 3072 + self.maccs_sub_dim]
+                if self.maccs_sub_dim > 0 and fp_aligned.shape[-1] > 3072
+                else torch.zeros(bsz, self.maccs_sub_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+            )
+            sar_vec = self.compute_frozen_sar_vector(fp_aligned, desc_aligned)
+        desc_eff = desc_aligned.clone()
+        if self.ablate_sec46_gate and desc_eff.shape[-1] > 9:
+            desc_eff[:, 9:] = 0.0
+        log1p_d = torch.log1p(dose_uM)
+        d_feat4 = torch.stack(
+            [
+                dose_log10,
+                log1p_d,
+                dose_uM / (0.5 + dose_uM),
+                dose_uM / (5.0 + dose_uM),
+            ],
+            dim=-1,
+        )
+        return torch.cat([desc_eff, maccs, sar_vec, d_feat4, desc_eff * log1p_d.unsqueeze(-1)], dim=-1)
+
+    def build_shared_ecfp_features(self, fp_aligned: torch.Tensor) -> torch.Tensor:
+        """Construct `[B, ecfp_sub_dim]` shared ECFP bits (`0` when chemical prior or Sec46 warhead gate is ablated)."""
+        if self.ablate_chem_prior or self.ablate_sec46_gate:
+            return torch.zeros(fp_aligned.shape[0], self.ecfp_sub_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+        return fp_aligned[:, : self.ecfp_sub_dim] * self.shared_ecfp_mask.to(
+            device=fp_aligned.device, dtype=fp_aligned.dtype
+        ).unsqueeze(0)
+
     def encode_chem_latent(self, fp: torch.Tensor, desc: torch.Tensor) -> torch.Tensor:
         """Encode `[fp, desc]` strictly from pure SMILES features into `[B, d_latent]`."""
         fp_aligned = self._align_vec(fp, self.chem_fp_dim)
@@ -316,7 +436,12 @@ class CompositionalPerturbationOperator(nn.Module):
             h = blk(h)
         return self.chem_out_norm(h)
 
-    def _compute_sar_features(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_sar_features(
+        self,
+        h: torch.Tensor,
+        fp_aligned: torch.Tensor | None = None,
+        desc_aligned: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         sar_raw = self.sar_pretrain_head(h)
         if self.ablate_chem_prior:
             return torch.zeros_like(sar_raw), sar_raw
@@ -365,7 +490,7 @@ class CompositionalPerturbationOperator(nn.Module):
         z_cell: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return `(occ_14, k_rta, k_chelate, k_apop, k_necro, pec50_14)` strictly from structure + dose."""
-        occ, k_rta, k_chelate, k_apop, k_necro, pec50, _ = self._encode_single_drug_with_latent(
+        occ, k_rta, k_chelate, k_apop, k_necro, pec50, _, _ = self._encode_single_drug_with_latent(
             fp, desc, dose_raw, dose_is_log10, bsz, device, dtype, z_cell=z_cell
         )
         return occ, k_rta, k_chelate, k_apop, k_necro, pec50
@@ -380,12 +505,21 @@ class CompositionalPerturbationOperator(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
         z_cell: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         zeros_14 = torch.zeros(bsz, len(CHEM_14_TARGETS), device=device, dtype=dtype)
         zeros_1 = torch.zeros(bsz, device=device, dtype=dtype)
         zeros_lat = torch.zeros(bsz, self.d_latent, device=device, dtype=dtype)
         if fp is None and desc is None:
-            return zeros_14, zeros_1, zeros_1, zeros_1, zeros_1, zeros_14, zeros_lat
+            return zeros_14, zeros_1, zeros_1, zeros_1, zeros_1, zeros_14, zeros_lat, zeros_lat
 
         fp_aligned = (
             self._align_vec(fp.to(device=device, dtype=dtype), self.chem_fp_dim)
@@ -410,9 +544,10 @@ class CompositionalPerturbationOperator(nn.Module):
                 dose_uM = d_clean.clamp(min=0.0) * drug_present
 
         active = drug_present * (dose_uM > 1e-7).to(dtype=dtype)
+        dose_log10_eff = torch.log10((dose_uM + 1e-3).clamp(min=1e-4))
 
         h = self.encode_chem_latent(fp_aligned, desc_aligned)
-        sar_feats, sar_raw = self._compute_sar_features(h)
+        sar_feats, sar_raw = self._compute_sar_features(h, fp_aligned=fp_aligned, desc_aligned=desc_aligned)
         mech_in = torch.cat([h, sar_feats, desc_aligned], dim=-1)
         raw = self.chem_mech_head(mech_in)
         n_t = len(CHEM_14_TARGETS)
@@ -424,6 +559,10 @@ class CompositionalPerturbationOperator(nn.Module):
         if z_cell is not None and not self.ablate_chem_prior:
             zc_al = self._align_vec(z_cell.to(device=device, dtype=dtype), self.d_cell)
             cell_film_shift = 0.85 * torch.tanh(self.cell_bioact_film(torch.cat([zc_al, h], dim=-1)))
+
+        has_desc_vals = (desc_aligned.abs().sum(dim=-1) > 1e-6).to(dtype=dtype) if desc is not None else zeros_1
+        lip_perm = torch.sigmoid(1.8 * (desc_aligned[:, 1] + 0.25 - 0.35 * desc_aligned[:, 2]))
+        perm_gate_drug = 1.0 - has_desc_vals * (1.0 - (0.25 + 0.75 * lip_perm))
 
         if self.ablate_chem_prior:
             occ = torch.sigmoid(raw[:, :n_t] - 2.0) * active.unsqueeze(-1) * torch.tanh(0.2 * dose_uM.unsqueeze(-1))
@@ -489,8 +628,18 @@ class CompositionalPerturbationOperator(nn.Module):
             ],
             dim=-1,
         )
+        raw_cdense = self.build_raw_chem_dense_features(fp_aligned, desc_aligned, dose_uM, dose_log10_eff)
+        c_mean = self.chem_dense_mean.to(device=device, dtype=dtype).unsqueeze(0)
+        c_scale = self.chem_dense_scale.to(device=device, dtype=dtype).clamp(min=2e-2).unsqueeze(0)
+        cdense_std = ((raw_cdense - c_mean) / c_scale).clamp(-8.0, 8.0)
+        z_scaf_inv = self.chem_scaffold_inv_enc(cdense_std)
+
+        ecfp_sub = self.build_shared_ecfp_features(fp_aligned)
+        z_ecfp_sh = self.chem_shared_ecfp_enc(ecfp_sub)
+        z_chem_scaf = F.silu(self.chem_scaffold_fuse(torch.cat([z_scaf_inv, z_ecfp_sh], dim=-1))) * active.unsqueeze(-1)
+
         z_chem_dosed = (h + self.dose_proj(torch.cat([mech_in, dose_feat], dim=-1))) * active.unsqueeze(-1)
-        return occ, k_rta, k_chelate, k_apop, k_necro, pec50, z_chem_dosed
+        return occ, k_rta, k_chelate, k_apop, k_necro, pec50, z_chem_dosed, z_chem_scaf
 
     @staticmethod
     def _hill_scalar(conc: torch.Tensor, ec50: float = 1.0) -> torch.Tensor:
@@ -559,10 +708,10 @@ class CompositionalPerturbationOperator(nn.Module):
         if dose_b is not None and not isinstance(dose_b, torch.Tensor):
             dose_b = torch.as_tensor(dose_b, device=device, dtype=dtype)
 
-        occ_a, rta_a, chel_a, apop_a, necro_a, pec50_a, z_chem_a = self._encode_single_drug_with_latent(
+        occ_a, rta_a, chel_a, apop_a, necro_a, pec50_a, z_chem_a, z_scaf_a = self._encode_single_drug_with_latent(
             fp_a, desc_a, dose_a, dose_a_is_log10, bsz, device, dtype, z_cell=z_cell
         )
-        occ_b, rta_b, chel_b, apop_b, necro_b, _, z_chem_b = self._encode_single_drug_with_latent(
+        occ_b, rta_b, chel_b, apop_b, necro_b, _, z_chem_b, z_scaf_b = self._encode_single_drug_with_latent(
             fp_b, desc_b, dose_b, dose_b_is_log10, bsz, device, dtype, z_cell=z_cell
         )
 
@@ -573,6 +722,7 @@ class CompositionalPerturbationOperator(nn.Module):
         k_apop_drug = apop_a + apop_b
         k_necro_drug = necro_a + necro_b
         z_chem_active = z_chem_a + z_chem_b
+        z_chem_scaf = z_scaf_a + z_scaf_b
 
         rta_conc = self._extract_1d(batch, ("rta_conc", "liproxstatin_1", "ferrostatin_1"), bsz, device, dtype, 0.0).clamp(min=0.0)
         chelator_conc = self._extract_1d(batch, ("chelator_conc", "dfo_conc", "cpx_conc"), bsz, device, dtype, 0.0).clamp(min=0.0)
@@ -759,6 +909,7 @@ class CompositionalPerturbationOperator(nn.Module):
             "target_occ": target_occ,
             "pred_pec50": pec50_a,
             "z_chem_active": z_chem_active,
+            "z_chem_scaf": z_chem_scaf,
             "bliss_interaction": bliss_interaction,
             "k_rta_drug": k_rta_drug,
             "k_chelate_drug": k_chelate_drug,

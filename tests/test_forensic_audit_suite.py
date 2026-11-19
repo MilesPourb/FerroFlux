@@ -307,3 +307,67 @@ def test_v3_fast_multimodal_indexer_exact_parity() -> None:
         assert float((rv - fast_b[k]).abs().max().item()) < 1e-6, f"Parity mismatch on {k}"
 
 
+def test_v3_round2_sar_snapshot_mgm_shift_invariance_and_apop_identifiability() -> None:
+    torch.manual_seed(314)
+    m = FerroFluxFM(n_genes=128, d_model=64, n_layers=2, n_heads=2)
+    m.perturbation_op.snapshot_stage05_sar_anchor()
+    assert float(m.perturbation_op.has_sar_snapshot.item()) == 1.0
+    for p in m.perturbation_op.sar_anchor_blocks.parameters():
+        assert not p.requires_grad
+
+    fp_a, desc_a = compute_compound_featurization("CC(=O)OC1=CC=CC=C1C(=O)O")
+    fp_t = torch.from_numpy(fp_a).unsqueeze(0)
+    desc_t = torch.from_numpy(desc_a).unsqueeze(0)
+    sar_before = m.perturbation_op.compute_frozen_sar_vector(fp_t, desc_t).detach().clone()
+
+    # Mutate live chem_fp_proj weights -> frozen SAR anchor must remain bitwise identical!
+    with torch.no_grad():
+        m.perturbation_op.chem_fp_proj[0].weight.add_(1.25)
+    sar_after = m.perturbation_op.compute_frozen_sar_vector(fp_t, desc_t)
+    assert torch.allclose(sar_before, sar_after, atol=0.0)
+
+    # Ablated SAR pretrain must emit exact zeros for frozen SAR vector
+    m_ab = FerroFluxFM(n_genes=128, d_model=64, n_layers=2, n_heads=2, ablate_sar_pretrain=True)
+    assert float(m_ab.perturbation_op.compute_frozen_sar_vector(fp_t, desc_t).abs().max().item()) == 0.0
+
+    # Rescue-gated additive APHYNITY scaffold head preserves 100% Lip-1 & DFO rescue for arbitrary weights!
+    with torch.no_grad():
+        m.diff_ferro_gem.scaf_gb_ready.fill_(1.0)
+        for p in m.diff_ferro_gem.aphynity_scaf_head.parameters():
+            p.normal_(0.5, 0.25)
+    m.eval()
+    x_base = torch.linspace(0.5, 3.5, 128).unsqueeze(0).repeat(2, 1)
+    fp_b = fp_t.repeat(2, 1)
+    desc_b = desc_t.repeat(2, 1)
+    dose_b = torch.full((2,), encode_log10_dose_um(4.0))
+    with torch.no_grad():
+        o_drug = m({"gene_expr": x_base, "chem_fp_a": fp_b, "chem_desc_a": desc_b, "dose_a": dose_b})
+        o_lip = m({"gene_expr": x_base, "chem_fp_a": fp_b, "chem_desc_a": desc_b, "dose_a": dose_b, "rta_conc": torch.full((2,), 5.0)})
+        o_dfo = m({"gene_expr": x_base, "chem_fp_a": fp_b, "chem_desc_a": desc_b, "dose_a": dose_b, "chelator_conc": torch.full((2,), 5.0)})
+    assert bool((o_lip["h_ferro"] < o_drug["h_ferro"]).all()), "aphynity_scaf_head must preserve Lip-1 rescue!"
+    assert bool((o_dfo["h_ferro"] < o_drug["h_ferro"]).all()), "aphynity_scaf_head must preserve DFO rescue!"
+
+    # Verify full non-ablated `warmstart_from_train_indices` + `fit_post_curriculum_greybox_from_train_indices` execute cleanly
+    from ferroflux.data.dataset import FerroFluxMultimodalDataset
+    from ferroflux.training.train_curriculum import (
+        fit_post_curriculum_greybox_from_train_indices,
+        warmstart_from_train_indices,
+    )
+
+    ds_w = FerroFluxMultimodalDataset(data_dir=ROOT_DIR / "data" / "processed", license_track="open", max_samples_per_shard=600)
+    m_w = FerroFluxFM(n_genes=ds_w.n_genes, d_model=64, n_layers=2, n_heads=2, ablate_physical_anchors=False)
+    m_w.perturbation_op.snapshot_stage05_sar_anchor()
+    tr_sub = list(range(len(ds_w) - 100))
+    forbid_sub = set(range(len(ds_w) - 100, len(ds_w)))
+    warmstart_from_train_indices(m_w, ds_w, tr_sub, forbid_test_set=forbid_sub, device=torch.device("cpu"), seed=101)
+    fit_post_curriculum_greybox_from_train_indices(
+        m_w, ds_w, tr_sub, forbid_test_set=forbid_sub, split_name="1_leave_out_scaffold", device=torch.device("cpu"), seed=101
+    )
+    assert float(m_w.diff_ferro_gem.scaf_gb_ready.item()) == 1.0
+    fit_post_curriculum_greybox_from_train_indices(
+        m_w, ds_w, tr_sub, forbid_test_set=forbid_sub, split_name="5_cuproptosis_elesclomol_specificity", device=torch.device("cpu"), seed=101
+    )
+
+
+
+

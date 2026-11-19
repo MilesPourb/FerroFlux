@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 
-from ferroflux.layers.cis_reg_slot import CisRegPriorSlot
+from ferroflux.layers.cis_reg_slot import CANONICAL_64_FERROPTOSIS_LOCI, CisRegPriorSlot
 from ferroflux.layers.diff_ferro_gem import EXTRA_CELL_CTX_DIM, DiffFerroGEM
 from ferroflux.layers.perceiver_trunk import (
     ANCHOR_12_METABOLITES,
@@ -40,7 +40,7 @@ from ferroflux.layers.perturbation_ops import (
     TARGET_TO_IDX,
     CompositionalPerturbationOperator,
 )
-from ferroflux.layers.sec46_gate import Sec46Gate
+from ferroflux.layers.sec46_gate import IPP_MEVALONATE_GENES, SEC_MACHINERY_GENES, Sec46Gate
 
 PRIMARY_5_HAZARDS: tuple[str, ...] = (
     "H_ferro",
@@ -67,8 +67,12 @@ _CANONICAL_PATHWAY_GENES: dict[str, tuple[str, ...]] = {
     "m2_tam": ("MRC1", "CD163", "ARG1", "IL10", "TGFB1"),
     "sterol_up": ("EBP", "SC5D"),
     "sterol_down": ("DHCR7",),
+    "sterol_7dhc_mask": ("EBP", "SC5D", "DHCR7"),
     "sterol_all": ("EBP", "SC5D", "DHCR7", "SQLE", "HMGCR", "CYP51A1", "MSMO1", "FDFT1"),
     "cupro_tca": ("FDX1", "LIAS", "LIPT1", "DLD", "DLAT", "PDHA1", "PDHB", "ACO2", "SDHB", "IDH2"),
+    "anchor_28": ANCHOR_28_PROTEINS,
+    "sec46_full": SEC_MACHINERY_GENES + IPP_MEVALONATE_GENES + ("GPX4",),
+    "cis_64": CANONICAL_64_FERROPTOSIS_LOCI,
 }
 
 
@@ -141,6 +145,7 @@ class FerroFluxFM(nn.Module):
         self.ablate_chem_prior = bool(ablate_chem_prior)
         self.ablate_physical_anchors = bool(ablate_physical_anchors)
         self.ablate_cis_reg = bool(ablate_cis_reg or ablate_cis_reg_slot)
+        self.ablate_cis_reg_slot = self.ablate_cis_reg
         self.ablate_aphynity_residual = bool(ablate_aphynity_residual)
         self.ablate_sar_pretrain = bool(ablate_sar_pretrain)
 
@@ -209,8 +214,16 @@ class FerroFluxFM(nn.Module):
             gem_json_path=gem_json_path,
             n_ode_substeps=12,
             d_chem_latent=d_chem_lat,
+            n_genes=self.n_genes,
             ablate_aphynity_residual=self.ablate_aphynity_residual,
         )
+        self.perturbation_op.ablate_sec46_gate = self.ablate_sec46_gate
+        self.diff_ferro_gem.ablate_sec46_gate = self.ablate_sec46_gate
+        self.diff_ferro_gem.ablate_physical_anchors = self.ablate_physical_anchors
+        self.diff_ferro_gem.ablate_cis_reg = self.ablate_cis_reg
+        self.diff_ferro_gem._anchor_gene_indices = tuple(self._pathway_idx_map.get("anchor_28", []))
+        self.diff_ferro_gem._sec46_gene_indices = tuple(self._pathway_idx_map.get("sec46_full", []))
+        self.diff_ferro_gem._cis_locus_gene_indices = tuple(self._pathway_idx_map.get("cis_64", []))
 
         # Biophysical link scalars mapping DiffFerroGEM ([PL-OOH], g_rupture, aphynity_gain) -> H_ferro
         self.raw_w_h_plooh = nn.Parameter(torch.tensor(0.85))
@@ -269,7 +282,7 @@ class FerroFluxFM(nn.Module):
         self.gene_essentiality_prior = nn.Parameter(torch.zeros(self.n_genes))
         self.gene_expr_slope_prior = nn.Parameter(torch.zeros(self.n_genes))
         self.gene_ctx_emb = nn.Parameter(torch.randn(self.n_genes, self.gene_rank_d) * 0.04)
-        self.cell_chronos_offset = nn.Linear(128 + EXTRA_CELL_CTX_DIM, 1)
+        self.cell_chronos_offset = nn.Linear(128, 1)
         nn.init.zeros_(self.cell_chronos_offset.weight)
         nn.init.zeros_(self.cell_chronos_offset.bias)
         cell_ko_in_dim = self.d_model + len(ANCHOR_28_PROTEINS) + len(ANCHOR_12_METABOLITES) + EXTRA_CELL_CTX_DIM + 128
@@ -292,6 +305,7 @@ class FerroFluxFM(nn.Module):
             + self.gene_rank_d
             + len(CHEM_14_TARGETS)
             + 4
+            + 6
         )
         self.chronos_head = nn.Sequential(
             nn.Linear(chronos_in_dim, self.d_model // 2),
@@ -305,7 +319,7 @@ class FerroFluxFM(nn.Module):
 
         self.synergy_head = nn.Linear(self.d_model + 4, 1)
         self.immunogenic_head = nn.Sequential(
-            nn.Linear(self.d_model + 128 + 6, self.d_model // 2),
+            nn.Linear(self.d_model + 128 + 7, self.d_model // 2),
             nn.LayerNorm(self.d_model // 2),
             nn.SiLU(),
             nn.Linear(self.d_model // 2, len(IMMUNOGENIC_6_PATHWAYS) + 1),
@@ -379,6 +393,11 @@ class FerroFluxFM(nn.Module):
         extra_cell_ctx: torch.Tensor,
         gene_expr_ctx: torch.Tensor,
         dtype: torch.dtype,
+        p_hat_log: torch.Tensor | None = None,
+        m0_hat_log: torch.Tensor | None = None,
+        gene_expr_raw: torch.Tensor | None = None,
+        gene_expr_mask: torch.Tensor | None = None,
+        cis_locus_ctx: torch.Tensor | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], torch.Tensor]:
         target_occ = pert_dict["target_occ"]
         gene_mult = pert_dict["gene_mult"]
@@ -397,7 +416,7 @@ class FerroFluxFM(nn.Module):
         )
         ipp_log = (
             0.5 * (p_eff_log[:, PROTEIN_TO_IDX["HMGCR"]] + p_eff_log[:, PROTEIN_TO_IDX["SQLE"]])
-            - 2.5 * target_occ[:, TARGET_TO_IDX["HMGCR"]]
+            - 3.2 * target_occ[:, TARGET_TO_IDX["HMGCR"]]
         )
         sec_out = self.sec46_gate.compute_active_gpx4(
             gpx4_expr=gpx4_log,
@@ -411,10 +430,17 @@ class FerroFluxFM(nn.Module):
             z_cell,
             p_hat=p_hat,
             m0_hat=m0_hat,
+            p_hat_log=p_hat_log,
+            m0_hat_log=m0_hat_log,
             e_gpx4_active=sec_out["e_gpx4_active"],
+            sec_readthrough_eff=sec_out["sec_readthrough_eff"],
+            ipp_trna_mod_eff=sec_out["ipp_trna_mod_eff"],
             pert_effects=pert_dict,
             extra_cell_ctx=extra_cell_ctx,
             gene_expr_ctx=gene_expr_ctx,
+            gene_expr_raw=gene_expr_raw,
+            gene_expr_mask=gene_expr_mask,
+            cis_locus_ctx=cis_locus_ctx,
         )
         pl_ooh = gem_out["pl_ooh"]
         g_rupture = gem_out["g_rupture"]
@@ -428,7 +454,8 @@ class FerroFluxFM(nn.Module):
         pore_hill = pl_sq / (k_pore.pow(2) + pl_sq)
         h_ferro_phys = (w_plooh * pl_ooh + w_pore * pore_hill * (1.0 + w_rup * g_rupture)).clamp(min=1e-7)
         gem_out["h_ferro_phys"] = h_ferro_phys
-        h_ferro = (h_ferro_phys * aphynity_gain).clamp(min=1e-7)
+        gb_w = gem_out["aphynity_gb_weight"]
+        h_ferro = ((1.0 - gb_w) * (h_ferro_phys * aphynity_gain) + gb_w * gem_out["aphynity_add_haz"]).clamp(min=1e-7)
         return sec_out, gem_out, h_ferro
 
     def forward(
@@ -471,7 +498,7 @@ class FerroFluxFM(nn.Module):
                     u_i, d_i = pmap.get("sterol_up", []), pmap.get("sterol_down", [])
                     if u_i and d_i:
                         mu = obs_full_tr[:, u_i].min(dim=-1).values * obs_full_tr[:, d_i].min(dim=-1).values
-                        val = x_full_tr[:, d_i].mean(dim=-1) - x_full_tr[:, u_i].mean(dim=-1)
+                        val = x_full_tr[:, u_i].mean(dim=-1) - x_full_tr[:, d_i].mean(dim=-1)
                         gt_cols.append(val)
                         gt_mcols.append((mu > 0.5).to(dtype=dtype))
                     else:
@@ -516,19 +543,19 @@ class FerroFluxFM(nn.Module):
                 use_blk = (torch.rand(bsz, 1, device=device, dtype=dtype) < 0.35).to(dtype=dtype)
                 drop_mask = torch.clamp(drop_mask + in_blk * use_blk, 0.0, 1.0)
 
-                # Functional pathway-module masking (`cGAS-STING + PD-L1/IFN` or `Distal Sterol`)
+                # Functional pathway-module masking (`cGAS-STING + PD-L1/IFN` or `Distal 7-DHC Sterol`)
                 sting_pdl1_idx = [i for i in (self._pathway_idx_map.get("cgas_sting", []) + self._pathway_idx_map.get("pdl1_ifn", [])) if i < g_in]
-                sterol_all_idx = [i for i in self._pathway_idx_map.get("sterol_all", []) if i < g_in]
+                sterol_7dhc_idx = [i for i in self._pathway_idx_map.get("sterol_7dhc_mask", []) if i < g_in]
                 draw_pw = torch.rand(bsz, device=device)
                 if sting_pdl1_idx:
                     m_sp = (draw_pw < 0.30).to(dtype=dtype).unsqueeze(-1)
                     sp_mask = torch.zeros(1, g_in, device=device, dtype=dtype)
                     sp_mask[0, sting_pdl1_idx] = 1.0
                     drop_mask = torch.clamp(drop_mask + m_sp * sp_mask, 0.0, 1.0)
-                if sterol_all_idx:
+                if sterol_7dhc_idx:
                     m_st = ((draw_pw >= 0.30) & (draw_pw < 0.55)).to(dtype=dtype).unsqueeze(-1)
                     st_mask = torch.zeros(1, g_in, device=device, dtype=dtype)
-                    st_mask[0, sterol_all_idx] = 1.0
+                    st_mask[0, sterol_7dhc_idx] = 1.0
                     drop_mask = torch.clamp(drop_mask + m_st * st_mask, 0.0, 1.0)
 
             drop_mask = drop_mask * obs_m
@@ -572,6 +599,8 @@ class FerroFluxFM(nn.Module):
             prot_64 = self._align_ctx_field(batch, "prot64_context", "prot64_mask", bsz, 64, device, dtype)
             lipid_32 = self._align_ctx_field(batch, "lipid32_context", "lipid32_mask", bsz, 32, device, dtype)
             extra_cell_ctx = torch.cat([genomic_138, prot_64, lipid_32], dim=-1)
+            if self.training:
+                extra_cell_ctx = F.dropout(extra_cell_ctx, p=0.12, training=True)
 
         # 2. Perceiver module trunk + 28 protein & 12 metabolite physical anchors + observed-only expr context
         x_aligned, obs_mask_aligned = self.perceiver_trunk._align_genes(gene_expr, expr_mask)
@@ -591,9 +620,11 @@ class FerroFluxFM(nn.Module):
             cis_reg_tokens=cis_tokens,
             mgm_keep_mask=mgm_keep_mask,
         )
-        z_cell = trunk_out["z_cell"] + self.multiomic_ctx_fusion(extra_cell_ctx)
+        z_cell = trunk_out["z_cell"] + self.multiomic_ctx_fusion(extra_cell_ctx) + 0.25 * cis_tokens.mean(dim=1)
         p_hat = trunk_out["p_hat"]
         m0_hat = trunk_out["m0_hat"]
+        p_hat_log = trunk_out["p_hat_log"]
+        m0_hat_log = trunk_out["m0_hat_log"]
 
         mgm_delta_ctx = self.mgm_ctx_decoder(torch.cat([z_cell, gene_expr_ctx], dim=-1))
         if g_in < self.n_genes:
@@ -620,9 +651,26 @@ class FerroFluxFM(nn.Module):
             media_vec = torch.stack(media_cols, dim=-1)
             pert_out["media_vec"] = media_vec
 
+        if self.ablate_cis_reg or epigen is None:
+            cis_locus_ctx = torch.zeros(bsz, 64, device=device, dtype=dtype)
+        else:
+            ep_al = self.cis_reg_slot._align_feature_shape(epigen.to(device=device, dtype=dtype))
+            cis_locus_ctx = 0.5 * ep_al[:, :64, 0] + 0.5 * ep_al[:, :64, 2]
+
         # 4 & 5. Sec46 translational gate + DiffFerroGEM grey-box peroxidation layer
         sec_out, gem_out, h_ferro_gem = self._compute_sec46_and_gem(
-            z_cell, p_hat, m0_hat, pert_out, extra_cell_ctx, gene_expr_ctx, dtype
+            z_cell,
+            p_hat,
+            m0_hat,
+            pert_out,
+            extra_cell_ctx,
+            gene_expr_ctx,
+            dtype,
+            p_hat_log=p_hat_log,
+            m0_hat_log=m0_hat_log,
+            gene_expr_raw=x_aligned * eff_obs_m,
+            gene_expr_mask=eff_obs_m,
+            cis_locus_ctx=cis_locus_ctx,
         )
         e_gpx4_active = sec_out["e_gpx4_active"]
         pl_ooh = gem_out["pl_ooh"]
@@ -751,7 +799,7 @@ class FerroFluxFM(nn.Module):
         ko_expr_centered = (x_cell_centered * ko_delta).sum(dim=-1, keepdim=True)
         ko_slope_shift = (x_cell_centered * ko_delta * self.gene_expr_slope_prior.to(dtype=dtype).unsqueeze(0)).sum(dim=-1)
         ko_prior_shift = torch.matmul(ko_delta, self.gene_essentiality_prior.to(dtype=dtype)) + ko_slope_shift
-        cell_base_offset = self.cell_chronos_offset(torch.cat([gene_expr_ctx, extra_cell_ctx], dim=-1)).squeeze(-1)
+        cell_base_offset = self.cell_chronos_offset(gene_expr_ctx).squeeze(-1)
 
         ko_cnv = (extra_cell_ctx[:, :64] * ko_delta[:, : min(64, self.n_genes)]).sum(dim=-1, keepdim=True) if self.n_genes >= 64 else torch.zeros(bsz, 1, device=device, dtype=dtype)
         ko_lof = (extra_cell_ctx[:, 64:128] * ko_delta[:, : min(64, self.n_genes)]).sum(dim=-1, keepdim=True) if self.n_genes >= 64 else torch.zeros(bsz, 1, device=device, dtype=dtype)
@@ -776,6 +824,17 @@ class FerroFluxFM(nn.Module):
         delta_expr_pred = raw_delta_expr * survivorship_factor.unsqueeze(-1)
         post_expr_pred = torch.nan_to_num(gene_expr, nan=0.0) + delta_expr_pred
 
+        gem_ko_feats = torch.stack(
+            [
+                pl_ooh.log1p(),
+                fe2_lyso.log1p(),
+                g_rupture,
+                seven_dhc_ss.log1p(),
+                e_gpx4_active.log1p(),
+                is_3d_vec,
+            ],
+            dim=-1,
+        )
         chronos_in = torch.cat(
             [
                 z_cell,
@@ -787,10 +846,16 @@ class FerroFluxFM(nn.Module):
                 ko_expr_centered,
                 ko_cnv,
                 ko_lof,
+                gem_ko_feats,
             ],
             dim=-1,
         )
-        chronos_single = self.chronos_head(chronos_in).squeeze(-1) + ko_prior_shift + cell_base_offset
+        chronos_single = (
+            self.chronos_head(chronos_in).squeeze(-1)
+            + ko_cell_bilinear.sum(dim=-1)
+            + ko_prior_shift
+            + cell_base_offset
+        )
 
         # Exact 4-Corner Population-Genetics Counterfactual Epistasis when BOTH Gene KO & Drug are Active!
         has_ko = ko_delta.abs().max(dim=-1).values > 0.05
@@ -806,8 +871,12 @@ class FerroFluxFM(nn.Module):
             zc_d = z_cell[d_idx]
             ph_d = p_hat[d_idx]
             m0_d = m0_hat[d_idx]
+            plog_d = p_hat_log[d_idx]
+            mlog_d = m0_hat_log[d_idx]
             ex_d = extra_cell_ctx[d_idx]
             gx_d = gene_expr_ctx[d_idx]
+            xraw_d = (x_aligned * eff_obs_m)[d_idx]
+            xmsk_d = eff_obs_m[d_idx]
             ones_d = torch.ones(nd, device=device, dtype=dtype)
             ones_28 = torch.ones(nd, len(ANCHOR_28_PROTEINS), device=device, dtype=dtype)
             zeros_14 = torch.zeros(nd, len(CHEM_14_TARGETS), device=device, dtype=dtype)
@@ -839,9 +908,13 @@ class FerroFluxFM(nn.Module):
                 ex_d,
                 gx_d,
                 dtype,
+                p_hat_log=plog_d,
+                m0_hat_log=mlog_d,
+                gene_expr_raw=xraw_d,
+                gene_expr_mask=xmsk_d,
             )
             # Corner (1, 0): KO + Vehicle
-            _, gem_k0, _ = self._compute_sec46_and_gem(
+            sec_k0, gem_k0, _ = self._compute_sec46_and_gem(
                 zc_d,
                 ph_d,
                 m0_d,
@@ -856,6 +929,10 @@ class FerroFluxFM(nn.Module):
                 ex_d,
                 gx_d,
                 dtype,
+                p_hat_log=plog_d,
+                m0_hat_log=mlog_d,
+                gene_expr_raw=xraw_d,
+                gene_expr_mask=xmsk_d,
             )
             # Corner (0, 0): WT + Vehicle
             _, gem_w0, _ = self._compute_sec46_and_gem(
@@ -878,6 +955,10 @@ class FerroFluxFM(nn.Module):
                 ex_d,
                 gx_d,
                 dtype,
+                p_hat_log=plog_d,
+                m0_hat_log=mlog_d,
+                gene_expr_raw=xraw_d,
+                gene_expr_mask=xmsk_d,
             )
 
             gain_d = gem_out["aphynity_gain"][d_idx]
@@ -908,6 +989,17 @@ class FerroFluxFM(nn.Module):
             combined_hazard_shift = 0.70 * (d_drug_ferro + d_drug_cupro) + 0.30 * (dd_ferro + dd_cupro)
             epistatic_lfc = 3.2 * torch.tanh((-inv_ln2 * epi_gain * combined_hazard_shift) / 3.2)
 
+            gem_k0_feats = torch.stack(
+                [
+                    gem_k0["pl_ooh"].log1p(),
+                    gem_k0["fe2_lyso"].log1p(),
+                    gem_k0["g_rupture"],
+                    gem_k0["seven_dhc_ss"].log1p(),
+                    sec_k0["e_gpx4_active"].log1p(),
+                    is_3d_vec[d_idx],
+                ],
+                dim=-1,
+            )
             chronos_in_k0 = torch.cat(
                 [
                     zc_d,
@@ -919,10 +1011,16 @@ class FerroFluxFM(nn.Module):
                     ko_expr_centered[d_idx],
                     ko_cnv[d_idx],
                     ko_lof[d_idx],
+                    gem_k0_feats,
                 ],
                 dim=-1,
             )
-            basal_ko_fit = self.chronos_head(chronos_in_k0).squeeze(-1) + ko_prior_shift[d_idx] + cell_base_offset[d_idx]
+            basal_ko_fit = (
+                self.chronos_head(chronos_in_k0).squeeze(-1)
+                + ko_cell_bilinear[d_idx].sum(dim=-1)
+                + ko_prior_shift[d_idx]
+                + cell_base_offset[d_idx]
+            )
             chronos_dual = epistatic_lfc + 0.08 * ko_prior_shift[d_idx] + 0.04 * basal_ko_fit
 
             chronos_pred = chronos_single.clone()
@@ -940,6 +1038,7 @@ class FerroFluxFM(nn.Module):
                 seven_dhc_ss.unsqueeze(-1),
                 media_vec[:, 9:10],
                 viability_pred.unsqueeze(-1),
+                h_ferro.log1p().unsqueeze(-1),
             ],
             dim=-1,
         )
@@ -988,6 +1087,7 @@ class FerroFluxFM(nn.Module):
             "sec_readthrough_eff": sec_out["sec_readthrough_eff"],
             "aphynity_gain": gem_out["aphynity_gain"],
             "aphynity_logit": aphynity_logit,
+            "rescue_shield": gem_out["rescue_shield"],
             "rates": gem_out["rates"],
             "h_ferro": h_ferro,
             "h_apop": h_apop,

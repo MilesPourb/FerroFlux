@@ -110,8 +110,9 @@ class DifferentiableRankAndCorrelationLoss(nn.Module):
         target: torch.Tensor | None,
         mask: torch.Tensor | None = None,
         group_ids: torch.Tensor | None = None,
+        sample_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, bool]:
-        huber_val, has_valid = _masked_huber(pred, target, mask=mask, delta=self.huber_delta)
+        huber_val, has_valid = _masked_huber(pred, target, mask=mask, weights=sample_weights, delta=self.huber_delta)
         if not has_valid or target is None:
             return huber_val, False
 
@@ -127,19 +128,34 @@ class DifferentiableRankAndCorrelationLoss(nn.Module):
 
         pv = p_f[m_f]
         tv = t_f[m_f]
+        wv = (
+            torch.nan_to_num(sample_weights.to(device=pred.device).float().reshape(-1)[m_f], nan=1.0).clamp(0.2, 5.0)
+            if isinstance(sample_weights, torch.Tensor) and sample_weights.numel() == p_f.numel()
+            else None
+        )
         gv = group_ids.to(device=pred.device).reshape(-1)[m_f] if isinstance(group_ids, torch.Tensor) and group_ids.numel() == p_f.numel() else None
         if pv.numel() > 256:
             pv = pv[:256]
             tv = tv[:256]
+            if wv is not None:
+                wv = wv[:256]
             if gv is not None:
                 gv = gv[:256]
 
-        t_centered = tv - tv.mean()
+        if wv is not None:
+            w_sum = wv.sum().clamp(min=1e-4)
+            t_mean = (tv * wv).sum() / w_sum
+            p_mean = (pv * wv).sum() / w_sum
+            w_sqrt = wv.sqrt()
+            t_centered = (tv - t_mean) * w_sqrt
+            p_centered = (pv - p_mean) * w_sqrt
+        else:
+            t_centered = tv - tv.mean()
+            p_centered = pv - pv.mean()
         t_norm = t_centered.norm()
         if t_norm.item() < 1e-5:
             return huber_val, True
 
-        p_centered = pv - pv.mean()
         p_norm = (p_centered.pow(2).sum() + 1e-6).sqrt()
         pearson_r = (p_centered * t_centered).sum() / (p_norm * t_norm + 1e-6)
         corr_loss = (1.0 - pearson_r.clamp(-1.0, 1.0)).to(pred.dtype)

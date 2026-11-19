@@ -66,6 +66,7 @@ class DiffFerroGEM(nn.Module):
         n_ode_substeps: int = 12,
         n_cone_iters: int = 6,
         d_chem_latent: int = 192,
+        n_genes: int = 2048,
         ablate_aphynity_residual: bool = False,
     ) -> None:
         super().__init__()
@@ -75,7 +76,14 @@ class DiffFerroGEM(nn.Module):
         self.n_ode_substeps = max(4, int(n_ode_substeps))
         self.n_cone_iters = max(1, int(n_cone_iters))
         self.d_chem_latent = int(d_chem_latent)
+        self.n_genes = int(n_genes)
         self.ablate_aphynity_residual = bool(ablate_aphynity_residual)
+        self.ablate_sec46_gate: bool = False
+        self.ablate_physical_anchors: bool = False
+        self.ablate_cis_reg: bool = False
+        self._anchor_gene_indices: tuple[int, ...] = ()
+        self._sec46_gene_indices: tuple[int, ...] = ()
+        self._cis_locus_gene_indices: tuple[int, ...] = ()
 
         default_gem = Path(__file__).resolve().parent.parent.parent / "configs" / "ferro_gem_94rxn.json"
         resolved_path = gem_json_path if gem_json_path is not None else (config_path if config_path is not None else default_gem)
@@ -103,8 +111,36 @@ class DiffFerroGEM(nn.Module):
         self.standalone_p_head = nn.Linear(self.d_model, len(ANCHOR_28_PROTEINS))
         self.standalone_m_head = nn.Linear(self.d_model, len(ANCHOR_12_METABOLITES))
 
-        # APHYNITY Grey-Box Bilinear Drug x Cell x Multi-Omic Multiplicative Residual (zero-initialized!)
-        d_inter = max(96, min(256, self.d_model))
+        # APHYNITY Grey-Box Bilinear Drug x Cell x Multi-Omic Residual (Multiplicative + Rescue-Gated Additive)
+        d_inter = max(128, min(256, self.d_model))
+        self.full_cell_dim = self.n_genes + len(ANCHOR_28_PROTEINS) + len(ANCHOR_12_METABOLITES) + EXTRA_CELL_CTX_DIM + 64
+        self.register_buffer("cell_expr_mean", torch.zeros(self.full_cell_dim, dtype=torch.float32), persistent=True)
+        self.register_buffer("cell_expr_scale", torch.ones(self.full_cell_dim, dtype=torch.float32), persistent=True)
+        self.aphynity_scaf_cell_net = nn.Sequential(
+            nn.Dropout(0.25),
+            nn.Linear(self.full_cell_dim, 256),
+            nn.LayerNorm(256),
+            nn.SiLU(),
+            nn.Dropout(0.25),
+            nn.Linear(256, self.d_chem_latent),
+            nn.LayerNorm(self.d_chem_latent),
+            nn.SiLU(),
+        )
+        self.aphynity_scaf_head = nn.Sequential(
+            nn.Linear(self.d_chem_latent * 3, 192),
+            nn.LayerNorm(192),
+            nn.SiLU(),
+            nn.Dropout(0.15),
+            nn.Linear(192, 1),
+        )
+        nn.init.zeros_(self.aphynity_scaf_head[-1].weight)
+        nn.init.zeros_(self.aphynity_scaf_head[-1].bias)
+        self.aphynity_scaf_ferro_gate = nn.Linear(self.d_chem_latent, 1)
+        nn.init.zeros_(self.aphynity_scaf_ferro_gate.weight)
+        nn.init.constant_(self.aphynity_scaf_ferro_gate.bias, 4.0)
+        self.register_buffer("scaf_gb_ready", torch.tensor(0.0, dtype=torch.float32), persistent=True)
+        self.raw_scaf_gb_blend = nn.Parameter(torch.tensor(0.0))
+
         cell_inter_in = self.d_model + len(ANCHOR_28_PROTEINS) + len(ANCHOR_12_METABOLITES) + EXTRA_CELL_CTX_DIM + 128
         self.aphynity_cell_proj = nn.Sequential(
             nn.Linear(cell_inter_in, d_inter),
@@ -205,6 +241,63 @@ class DiffFerroGEM(nn.Module):
                 self.P_null = torch.from_numpy(n_np @ n_np.T).to(device=dev, dtype=torch.float64)
                 self.irrev_mask = torch.from_numpy(irrev_np).to(device=dev, dtype=torch.float64)
 
+    def build_raw_cell_greybox_features(
+        self,
+        gx_full: torch.Tensor,
+        gm_full: torch.Tensor,
+        plog_al: torch.Tensor,
+        mlog_al: torch.Tensor,
+        ctx_aligned: torch.Tensor,
+        cis_al: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Construct `[B, full_cell_dim]` grey-box cellular state respecting physical/Sec46/cis ablations & somatic damping."""
+        bsz = gx_full.shape[0]
+        device = gx_full.device
+        dtype = gx_full.dtype
+        gx_eff = gx_full.clone()
+        gm_eff = gm_full.clone()
+
+        if self.ablate_physical_anchors:
+            valid_anc = [i for i in self._anchor_gene_indices if 0 <= i < self.n_genes]
+            if valid_anc:
+                gx_eff[:, valid_anc] = 0.0
+                gm_eff[:, valid_anc] = 0.0
+            p_eff_log = torch.zeros_like(plog_al)
+            m_eff_log = torch.zeros_like(mlog_al)
+            ctx_eff = torch.zeros_like(ctx_aligned)
+        else:
+            p_eff_log = plog_al
+            m_eff_log = mlog_al
+            ctx_eff = ctx_aligned
+
+        if self.ablate_sec46_gate:
+            valid_sec = [i for i in self._sec46_gene_indices if 0 <= i < self.n_genes]
+            if valid_sec:
+                gx_eff[:, valid_sec] = 0.0
+                gm_eff[:, valid_sec] = 0.0
+
+        if self.ablate_cis_reg:
+            valid_cis = [i for i in self._cis_locus_gene_indices if 0 <= i < self.n_genes]
+            if valid_cis:
+                gx_eff[:, valid_cis] = 0.0
+                gm_eff[:, valid_cis] = 0.0
+            cis_eff = torch.zeros_like(cis_al)
+        else:
+            cis_eff = cis_al
+
+        tail_dim = len(ANCHOR_28_PROTEINS) + len(ANCHOR_12_METABOLITES) + EXTRA_CELL_CTX_DIM + 64
+        full_cell_raw = torch.cat([gx_eff * gm_eff, p_eff_log, m_eff_log, ctx_eff, cis_eff], dim=-1)
+        full_mask = torch.cat([gm_eff, torch.ones(bsz, tail_dim, device=device, dtype=dtype)], dim=-1)
+        return full_cell_raw, full_mask
+
+    def standardize_cell_greybox_features(self, full_cell_raw: torch.Tensor, full_mask: torch.Tensor) -> torch.Tensor:
+        """Standardize `[B, full_cell_dim]` strictly using train-only `cell_expr_mean` and `cell_expr_scale`."""
+        dtype = full_cell_raw.dtype
+        device = full_cell_raw.device
+        cm = self.cell_expr_mean.to(device=device, dtype=dtype).unsqueeze(0)
+        cs = self.cell_expr_scale.to(device=device, dtype=dtype).clamp(min=2e-2).unsqueeze(0)
+        return (((full_cell_raw - cm) / cs) * full_mask).clamp(-8.0, 8.0)
+
     def _align_dim(self, x: torch.Tensor, target_dim: int) -> torch.Tensor:
         z = torch.nan_to_num(x, nan=0.0, posinf=15.0, neginf=-15.0)
         if z.ndim == 1:
@@ -230,11 +323,18 @@ class DiffFerroGEM(nn.Module):
         *,
         p_hat: torch.Tensor | None = None,
         m0_hat: torch.Tensor | None = None,
+        p_hat_log: torch.Tensor | None = None,
+        m0_hat_log: torch.Tensor | None = None,
         e_gpx4_active: torch.Tensor | None = None,
+        sec_readthrough_eff: torch.Tensor | None = None,
+        ipp_trna_mod_eff: torch.Tensor | None = None,
         pert_effects: dict[str, torch.Tensor] | None = None,
         dt: torch.Tensor | float | None = None,
         extra_cell_ctx: torch.Tensor | None = None,
         gene_expr_ctx: torch.Tensor | None = None,
+        gene_expr_raw: torch.Tensor | None = None,
+        gene_expr_mask: torch.Tensor | None = None,
+        cis_locus_ctx: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         """Compute cone-projected nullspace fluxes, radical-chain peroxidation, and APHYNITY residual."""
         self._maybe_refresh_gem()
@@ -521,7 +621,7 @@ class DiffFerroGEM(nn.Module):
         pl_ooh = y_ooh.clamp(min=1e-7)
 
         # ------------------------------------------------------------------
-        # 6. APHYNITY Grey-Box Multiplicative Residual (Preserves 100% Causal Monotonicity)
+        # 6. APHYNITY Grey-Box Multiplicative + Rescue-Gated Additive Residual (Preserves 100% Causal Monotonicity)
         # ------------------------------------------------------------------
         ctx_aligned = (
             self._align_dim(extra_cell_ctx.to(device=device, dtype=dtype), EXTRA_CELL_CTX_DIM)
@@ -533,6 +633,17 @@ class DiffFerroGEM(nn.Module):
             if gene_expr_ctx is not None
             else torch.zeros(bsz, 128, device=device, dtype=dtype)
         )
+        plog_al = (
+            self._align_dim(p_hat_log.to(device=device, dtype=dtype), len(ANCHOR_28_PROTEINS))
+            if p_hat_log is not None
+            else torch.zeros(bsz, len(ANCHOR_28_PROTEINS), device=device, dtype=dtype)
+        )
+        mlog_al = (
+            self._align_dim(m0_hat_log.to(device=device, dtype=dtype), len(ANCHOR_12_METABOLITES))
+            if m0_hat_log is not None
+            else torch.zeros(bsz, len(ANCHOR_12_METABOLITES), device=device, dtype=dtype)
+        )
+
         z_cell_inter = self.aphynity_cell_proj(torch.cat([z, p_base, m0, ctx_aligned, gx_ctx], dim=-1))
         z_chem_inter = self.aphynity_chem_proj(torch.cat([z_chem_active, target_occ], dim=-1))
         z_bilinear = torch.cat([z_cell_inter, z_chem_inter, z_cell_inter * z_chem_inter], dim=-1)
@@ -543,11 +654,47 @@ class DiffFerroGEM(nn.Module):
         ).to(dtype=dtype)
         aphynity_logit = self.aphynity_residual_net(z_bilinear).squeeze(-1) * (0.20 + 0.80 * pert_gate)
 
+        rescue_shield = (
+            (1.10 / (1.0 + 1.5 * k_rta_drug + 0.25 * seven_dhc_ss))
+            * (fe2_lyso / (fe2_lyso + 0.45 * k_chelate_drug + 1e-5))
+        )
+        aphynity_add_haz = torch.zeros(bsz, device=device, dtype=dtype)
+        aphynity_gb_weight = torch.zeros(bsz, device=device, dtype=dtype)
+        z_scaf_raw = pert_effects.get("z_chem_scaf") if isinstance(pert_effects, dict) else None
+        if (
+            not self.ablate_aphynity_residual
+            and float(self.scaf_gb_ready.item()) > 0.5
+            and isinstance(z_scaf_raw, torch.Tensor)
+            and gene_expr_raw is not None
+        ):
+            zc_scaf = self._align_dim(z_scaf_raw.to(device=device, dtype=dtype), self.d_chem_latent)
+            scaf_active = (zc_scaf.abs().sum(dim=-1) > 1e-6).to(dtype=dtype)
+            gx_full = self._align_dim(gene_expr_raw.to(device=device, dtype=dtype), self.n_genes)
+            gm_full = (
+                self._align_dim(gene_expr_mask.to(device=device, dtype=dtype), self.n_genes).clamp(0.0, 1.0)
+                if gene_expr_mask is not None
+                else torch.ones_like(gx_full)
+            )
+            cis_al = (
+                self._align_dim(cis_locus_ctx.to(device=device, dtype=dtype), 64)
+                if cis_locus_ctx is not None
+                else torch.zeros(bsz, 64, device=device, dtype=dtype)
+            )
+            full_cell_raw, full_mask = self.build_raw_cell_greybox_features(
+                gx_full, gm_full, plog_al, mlog_al, ctx_aligned, cis_al
+            )
+            cell_std_vec = self.standardize_cell_greybox_features(full_cell_raw, full_mask)
+            zx_scaf = self.aphynity_scaf_cell_net(cell_std_vec)
+            raw_add = self.aphynity_scaf_head(torch.cat([zc_scaf, zx_scaf, zc_scaf * zx_scaf], dim=-1)).squeeze(-1)
+            ferro_gate_prob = torch.sigmoid(self.aphynity_scaf_ferro_gate(zc_scaf).squeeze(-1))
+            aphynity_add_haz = F.softplus(raw_add - 1.2) * scaf_active * rescue_shield
+            aphynity_gb_weight = torch.sigmoid(self.raw_scaf_gb_blend.to(dtype=dtype)) * scaf_active * ferro_gate_prob
+
         if self.ablate_aphynity_residual:
             aphynity_gain = ones_1d
             aphynity_logit = torch.zeros(bsz, device=device, dtype=dtype)
         else:
-            aphynity_gain = torch.exp(2.0 * torch.tanh(aphynity_logit))
+            aphynity_gain = torch.exp(2.4 * torch.tanh(aphynity_logit))
 
         rates = {
             "k_fenton_init": k_fenton_init,
@@ -580,6 +727,9 @@ class DiffFerroGEM(nn.Module):
             "spermine_pool": spermine_pool,
             "aphynity_gain": aphynity_gain,
             "aphynity_logit": aphynity_logit,
+            "aphynity_add_haz": aphynity_add_haz,
+            "aphynity_gb_weight": aphynity_gb_weight,
+            "rescue_shield": rescue_shield,
             "rates": rates,
         }
 

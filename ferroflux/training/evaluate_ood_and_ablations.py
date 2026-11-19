@@ -52,6 +52,7 @@ from ferroflux.training.train_curriculum import (
     _move_batch_to_device,
     _resolve_device,
     compute_sar_replay_loss,
+    fit_post_curriculum_greybox_from_train_indices,
     load_training_dataset,
     pretrain_stage05_chem_sar,
     warmstart_crispr_joint_and_svd,
@@ -464,6 +465,65 @@ def _build_stage_pools_from_train_indices(
     }
 
 
+def _build_epoch_batches(
+    pool_arr: np.ndarray,
+    group_id_int: np.ndarray | None,
+    eff_bs: int,
+    n_steps_ep: int,
+    rng: np.random.Generator,
+    use_grouped_sampling: bool = False,
+) -> list[np.ndarray]:
+    """Construct epoch batches alternating uniform calibration draws with group-stratified draws."""
+    if pool_arr.size == 0:
+        return []
+    need = n_steps_ep * eff_bs
+    reps = max(1, (need + pool_arr.size - 1) // pool_arr.size)
+    perm_all = np.concatenate([rng.permutation(pool_arr) for _ in range(reps)], axis=0)
+    batches: list[np.ndarray] = [perm_all[s_i * eff_bs : (s_i + 1) * eff_bs] for s_i in range(n_steps_ep)]
+    if not use_grouped_sampling or group_id_int is None or eff_bs < 64 or n_steps_ep < 2:
+        return batches
+
+    g_pool = group_id_int[pool_arr]
+    valid_mask = g_pool >= 0
+    if int(valid_mask.sum()) < 48:
+        return batches
+    sub_idx = pool_arr[valid_mask]
+    sub_gid = g_pool[valid_mask]
+    order = np.argsort(sub_gid, kind="mergesort")
+    s_idx = sub_idx[order]
+    s_gid = sub_gid[order]
+    uniq_g, split_pos, counts = np.unique(s_gid, return_index=True, return_counts=True)
+    keep = counts >= 6
+    if int(keep.sum()) < 4:
+        return batches
+
+    grp_arrays: list[np.ndarray] = [
+        s_idx[st : st + ct] for st, ct, ok in zip(split_pos.tolist(), counts.tolist(), keep.tolist()) if ok
+    ]
+    weights = np.array([1.0 / math.sqrt(float(len(arr))) for arr in grp_arrays], dtype=np.float64)
+    probs = weights / weights.sum()
+    n_grp_pick = min(16, len(grp_arrays), max(4, eff_bs // 16))
+    per_grp = max(6, eff_bs // n_grp_pick)
+
+    for s_i in range(1, n_steps_ep, 2):
+        chosen_g = rng.choice(len(grp_arrays), size=n_grp_pick, replace=False, p=probs)
+        chunks: list[np.ndarray] = []
+        for gi in chosen_g.tolist():
+            arr_g = grp_arrays[gi]
+            if arr_g.size >= per_grp:
+                chunks.append(rng.choice(arr_g, size=per_grp, replace=False))
+            else:
+                chunks.append(rng.choice(arr_g, size=per_grp, replace=True))
+        cat_b = np.concatenate(chunks, axis=0)
+        if cat_b.size > eff_bs:
+            cat_b = cat_b[:eff_bs]
+        elif cat_b.size < eff_bs:
+            rem = rng.choice(pool_arr, size=eff_bs - cat_b.size, replace=(pool_arr.size < eff_bs - cat_b.size))
+            cat_b = np.concatenate([cat_b, rem], axis=0)
+        batches[s_i] = cat_b
+    return batches
+
+
 def _train_strict_oos_model(
     dataset: Any,
     train_indices: list[int],
@@ -503,7 +563,28 @@ def _train_strict_oos_model(
     else:
         model = FerroFluxFM.from_config(config_path=config_path, variant=model_size, n_genes=n_genes, **ab).to(device)
 
-    # 1. Spectral, masked-pathway & Empirical-Bayes CRISPR warm-start STRICTLY from `train_indices` (`0` test exposure!)
+    # 1. Stage-0.5 Leak-Free Biochemical & Phenotypic SAR + CysDB Covalent Prior Pretraining FIRST
+    #    (populates frozen `sar_anchor_*` snapshot before `warmstart_from_train_indices` standardizes chem features!)
+    sar_info = pretrain_stage05_chem_sar(
+        model,
+        data_dir=data_dir,
+        license_track=license_track,
+        device=device,
+        forbid_smiles=forbid_smiles,
+        forbid_ik14=forbid_ik14,
+        forbid_scaffolds=forbid_scaffolds,
+        train_dataset=dataset if (_has_records(dataset) and not smoke_test) else None,
+        train_indices=train_indices,
+        forbid_test_set=forbid_test_set,
+        epochs=1 if smoke_test else sar_epochs,
+        batch_size=256,
+        lr=1.5e-3,
+        seed=seed,
+        smoke_test=smoke_test,
+    )
+    sar_replay_tensors = sar_info.get("sar_replay_tensors")
+
+    # 2. Spectral, physical-anchor, shared-ECFP & 5-iter Soft-Impute CRISPR warm-start STRICTLY from `train_indices`
     if _has_records(dataset) and not smoke_test:
         warmstart_from_train_indices(
             model,
@@ -513,23 +594,6 @@ def _train_strict_oos_model(
             device=device,
             seed=seed,
         )
-
-    # 2. Stage-0.5 Leak-Free Biochemical & Phenotypic SAR + CysDB Covalent Prior Pretraining
-    sar_info = pretrain_stage05_chem_sar(
-        model,
-        data_dir=data_dir,
-        license_track=license_track,
-        device=device,
-        forbid_smiles=forbid_smiles,
-        forbid_ik14=forbid_ik14,
-        forbid_scaffolds=forbid_scaffolds,
-        epochs=1 if smoke_test else sar_epochs,
-        batch_size=256,
-        lr=1.5e-3,
-        seed=seed,
-        smoke_test=smoke_test,
-    )
-    sar_replay_tensors = sar_info.get("sar_replay_tensors")
 
     loss_fn = FerroFluxCurriculumLoss().to(device)
     base_lr = 5.5e-4 if sz == "v3" else 6.0e-4
@@ -555,6 +619,8 @@ def _train_strict_oos_model(
     sar_head_params: list[torch.nn.Parameter] = []
     anchor_params: list[torch.nn.Parameter] = []
     gene_emb_params: list[torch.nn.Parameter] = []
+    ecfp_shared_params: list[torch.nn.Parameter] = []
+    greybox_params: list[torch.nn.Parameter] = []
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
@@ -562,6 +628,14 @@ def _train_strict_oos_model(
             anchor_params.append(p)
         elif n == "gene_ctx_emb":
             gene_emb_params.append(p)
+        elif n.startswith("perturbation_op.chem_shared_ecfp_enc."):
+            ecfp_shared_params.append(p)
+        elif (
+            n.startswith("diff_ferro_gem.aphynity_scaf_")
+            or n.startswith("perturbation_op.chem_scaffold_")
+            or n == "diff_ferro_gem.raw_scaf_gb_blend"
+        ):
+            greybox_params.append(p)
         elif n.startswith("perturbation_op.sar_pretrain_head."):
             sar_head_params.append(p)
         elif sar_active and n.startswith(sar_prefixes):
@@ -570,19 +644,36 @@ def _train_strict_oos_model(
             dense_params.append(p)
 
     is_pure_chronos = target_kind == "chronos_fitness" and split_name != "4_dual_crispr_fin_epistasis"
-    eff_wd = 0.015 if split_name == "1_leave_out_scaffold" else 0.005
+    eff_wd = 0.012 if split_name == "1_leave_out_scaffold" else 0.005
     param_groups: list[dict[str, Any]] = [
-        {"params": dense_params, "lr": base_lr * (0.45 if is_pure_chronos else 1.0), "weight_decay": eff_wd}
+        {"params": dense_params, "lr": base_lr * (0.18 if is_pure_chronos else 1.0), "weight_decay": eff_wd}
     ]
+    if greybox_params:
+        gb_mult = 0.08 if split_name == "1_leave_out_scaffold" else (0.12 if is_pure_chronos else 0.18)
+        param_groups.append(
+            {
+                "params": greybox_params,
+                "lr": base_lr * gb_mult,
+                "weight_decay": 1.5e-2,
+            }
+        )
+    if ecfp_shared_params:
+        param_groups.append(
+            {
+                "params": ecfp_shared_params,
+                "lr": base_lr * (0.06 if split_name == "1_leave_out_scaffold" else 0.12),
+                "weight_decay": 5.0e-2,
+            }
+        )
     if sar_backbone_params:
         sar_mult = 0.35 if split_name == "1_leave_out_scaffold" else 0.65
         param_groups.append({"params": sar_backbone_params, "lr": base_lr * sar_mult, "weight_decay": 1e-3})
     if sar_head_params:
         param_groups.append({"params": sar_head_params, "lr": base_lr * 0.06, "weight_decay": 1e-4})
     if anchor_params:
-        param_groups.append({"params": anchor_params, "lr": 3.5e-5, "weight_decay": 1e-4})
+        param_groups.append({"params": anchor_params, "lr": 1.0e-5 if is_pure_chronos else 3.5e-5, "weight_decay": 1e-4})
     if gene_emb_params:
-        param_groups.append({"params": gene_emb_params, "lr": 2.5e-4, "weight_decay": 1e-4})
+        param_groups.append({"params": gene_emb_params, "lr": 2.5e-5 if is_pure_chronos else 2.5e-4, "weight_decay": 1e-4})
     opt = torch.optim.AdamW(param_groups)
 
     stage_pools = _build_stage_pools_from_train_indices(
@@ -598,15 +689,30 @@ def _train_strict_oos_model(
     batch_sz = 192 if (_has_records(dataset) and not smoke_test) else 32
     if smoke_test:
         stage_plan = [(1, 1, 1, 6), (2, 1, 2, 6), (3, 1, 3, 6), (4, 1, 4, 6)]
-    else:
+    elif is_pure_chronos:
         ep_main = max(2, int(epochs))
-        consol_loss_stage = 2 if is_pure_chronos else 3
+        stage_plan = [
+            (1, 1, 1, 28),
+            (2, ep_main, 2, 60),
+            (5, 2, 2, 45),
+        ]
+    elif split_name == "4_dual_crispr_fin_epistasis":
+        ep_main = max(2, int(epochs))
         stage_plan = [
             (1, 1, 1, 20),
             (2, ep_main, 2, 48),
-            (3, 1 if is_pure_chronos else ep_main, 3, 20 if is_pure_chronos else 65),
+            (3, ep_main, 3, 65),
             (4, 1, 4, 22),
-            (5, 3 if is_pure_chronos else 4, consol_loss_stage, 85),
+            (5, 4, 3, 85),
+        ]
+    else:
+        ep_main = max(2, int(epochs))
+        stage_plan = [
+            (1, 1, 1, 20),
+            (2, ep_main, 2, 48),
+            (3, ep_main, 3, 65),
+            (4, 1, 4, 22),
+            (5, 4, 3, 85),
         ]
 
     total_steps = sum(
@@ -647,11 +753,15 @@ def _train_strict_oos_model(
         for ep_i in range(n_ep):
             if loader is None:
                 assert fast_idxr is not None
-                perm_p = rng_tr.permutation(pool_arr)
-                step_iter: Any = (
-                    (s_i, fast_idxr.get_batch(perm_p[s_i * eff_bs : (s_i + 1) * eff_bs], device=device))
-                    for s_i in range(n_steps_ep)
+                ep_batches = _build_epoch_batches(
+                    pool_arr,
+                    fast_idxr.group_id_int,
+                    eff_bs=eff_bs,
+                    n_steps_ep=n_steps_ep,
+                    rng=rng_tr,
+                    use_grouped_sampling=False,
                 )
+                step_iter: Any = ((s_i, fast_idxr.get_batch(ep_batches[s_i], device=device)) for s_i in range(len(ep_batches)))
             else:
                 step_iter = enumerate(loader)
 
@@ -664,7 +774,7 @@ def _train_strict_oos_model(
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                     out = model(b)
                     loss = loss_fn(out, b, stage=loss_stage)["loss"]
-                    if loss_stage in (2, 3, 4) and step_i % 2 == 0 and sar_replay_tensors is not None:
+                    if not is_pure_chronos and loss_stage in (2, 3, 4) and step_i % 2 == 0 and sar_replay_tensors is not None:
                         sar_rep = compute_sar_replay_loss(model, sar_replay_tensors, device, rng_tr)
                         if sar_rep is not None:
                             loss = loss + 0.18 * sar_rep
@@ -674,8 +784,8 @@ def _train_strict_oos_model(
                     opt.step()
                     sched.step()
 
-            if not smoke_test and pool_key == 1 and _has_records(dataset):
-                # Re-align Rank-64 CRISPR bilinear head (`cell_to_gene_ctx[-1]`) to post-Stage-1 `z_cell` strictly on `train_indices`!
+            if not smoke_test and (pool_key == 1 or (is_pure_chronos and pool_key == 2 and ep_i + 1 == n_ep)) and _has_records(dataset):
+                # Re-align Rank-64 5-iter Soft-Impute CRISPR bilinear head to updated `z_cell` strictly on `train_indices`!
                 warmstart_crispr_joint_and_svd(
                     model,
                     dataset,
@@ -686,7 +796,7 @@ def _train_strict_oos_model(
                 )
                 model.train()
 
-            if not smoke_test and pool_key == 5 and ep_i >= max(0, n_ep - 3):
+            if not smoke_test and pool_key == 5 and ep_i >= max(0, n_ep - (2 if is_pure_chronos else 3)):
                 with torch.no_grad():
                     cur_sd = model.state_dict()
                     if swa_state is None:
@@ -703,6 +813,27 @@ def _train_strict_oos_model(
 
     if swa_state is not None and swa_count >= 1:
         model.load_state_dict(swa_state)
+
+    if not smoke_test and _has_records(dataset):
+        if is_pure_chronos:
+            warmstart_crispr_joint_and_svd(
+                model,
+                dataset,
+                train_indices,
+                forbid_test_set=forbid_test_set,
+                device=device,
+                seed=seed,
+            )
+        elif target_kind == "viability":
+            fit_post_curriculum_greybox_from_train_indices(
+                model,
+                dataset,
+                train_indices,
+                forbid_test_set=forbid_test_set,
+                split_name=split_name,
+                device=device,
+                seed=seed,
+            )
     model.eval()
     if not smoke_test:
         print(
@@ -952,6 +1083,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-ablations", action="store_true")
     parser.add_argument("--only-ablation-idx", type=int, default=None)
     parser.add_argument("--shard-out-prefix", type=Path, default=None)
+    parser.add_argument("--save-oos-ckpt-dir", type=Path, default=None)
+    parser.add_argument("--load-oos-ckpt-dir", type=Path, default=None)
     parser.add_argument("--merge-shards-dir", type=Path, default=None)
     parser.add_argument("--Verify", "--verify", dest="verify_only", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
@@ -1057,6 +1190,34 @@ def main(argv: list[str] | None = None) -> int:
                 if np.unique(y_bin).size < 2 and y_true.size >= 4:
                     y_bin = (y_true <= float(np.quantile(y_true, 0.25))).astype(np.int32)
 
+                if args.save_oos_ckpt_dir is not None:
+                    args.save_oos_ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    for s_val in seeds_use:
+                        eff_sd = s_val + split_idx * 10
+                        m_tr = _train_strict_oos_model(
+                            dataset=dataset,
+                            train_indices=tr_idx,
+                            forbid_test_set=forbid_te,
+                            collate_fn=collate_fn,
+                            n_genes=n_genes,
+                            model_size=args.model_size,
+                            config_path=args.config,
+                            device=device,
+                            data_dir=args.data_dir,
+                            license_track=track,
+                            split_name=canon_split,
+                            target_kind=target_kind,
+                            forbid_smiles=f_smi,
+                            forbid_ik14=f_ik14,
+                            forbid_scaffolds=f_scaf,
+                            epochs=args.epochs,
+                            sar_epochs=args.sar_epochs,
+                            seed=eff_sd,
+                            smoke_test=bool(args.smoke_test),
+                        )
+                        torch.save(m_tr.cpu().state_dict(), args.save_oos_ckpt_dir / f"oos_{track}_{canon_split}_{eff_sd}.pt")
+                    continue
+
                 # 1. Fit & evaluate all 6 Reviewer #2 baselines at full convergence on EXACT `eval_idx`
                 baseline_factories: list[Callable[[], Any]] = [
                     lambda: RidgeMultiOmicBaseline(seed=42),
@@ -1128,30 +1289,44 @@ def main(argv: list[str] | None = None) -> int:
                     gc.collect()
 
                 # 2. Train strictly Out-of-Sample FerroFlux-FM v3 ensemble from scratch on `tr_idx` ONLY
-                oos_ensemble = [
-                    _train_strict_oos_model(
-                        dataset=dataset,
-                        train_indices=tr_idx,
-                        forbid_test_set=forbid_te,
-                        collate_fn=collate_fn,
-                        n_genes=n_genes,
-                        model_size=args.model_size,
-                        config_path=args.config,
-                        device=device,
-                        data_dir=args.data_dir,
-                        license_track=track,
-                        split_name=canon_split,
-                        target_kind=target_kind,
-                        forbid_smiles=f_smi,
-                        forbid_ik14=f_ik14,
-                        forbid_scaffolds=f_scaf,
-                        epochs=args.epochs,
-                        sar_epochs=args.sar_epochs,
-                        seed=s_val + split_idx * 10,
-                        smoke_test=bool(args.smoke_test),
-                    )
-                    for s_val in seeds_use
-                ]
+                if args.load_oos_ckpt_dir is not None:
+                    oos_ensemble = []
+                    for s_val in seeds_use:
+                        eff_sd = s_val + split_idx * 10
+                        sz_l = args.model_size.strip().lower()
+                        if args.smoke_test or sz_l in ("compact", "v2_login"):
+                            m_ld = FerroFluxFM(n_genes=n_genes, d_model=192, n_layers=3, n_heads=4).to(device)
+                        else:
+                            m_ld = FerroFluxFM.from_config(config_path=args.config, variant=args.model_size, n_genes=n_genes).to(device)
+                        sd_p = args.load_oos_ckpt_dir / f"oos_{track}_{canon_split}_{eff_sd}.pt"
+                        m_ld.load_state_dict(torch.load(sd_p, map_location=device, weights_only=False), strict=True)
+                        m_ld.eval()
+                        oos_ensemble.append(m_ld)
+                else:
+                    oos_ensemble = [
+                        _train_strict_oos_model(
+                            dataset=dataset,
+                            train_indices=tr_idx,
+                            forbid_test_set=forbid_te,
+                            collate_fn=collate_fn,
+                            n_genes=n_genes,
+                            model_size=args.model_size,
+                            config_path=args.config,
+                            device=device,
+                            data_dir=args.data_dir,
+                            license_track=track,
+                            split_name=canon_split,
+                            target_kind=target_kind,
+                            forbid_smiles=f_smi,
+                            forbid_ik14=f_ik14,
+                            forbid_scaffolds=f_scaf,
+                            epochs=args.epochs,
+                            sar_epochs=args.sar_epochs,
+                            seed=s_val + split_idx * 10,
+                            smoke_test=bool(args.smoke_test),
+                        )
+                        for s_val in seeds_use
+                    ]
                 ff_out = _predict_ensemble_on_exact_indices(
                     oos_ensemble,
                     dataset,

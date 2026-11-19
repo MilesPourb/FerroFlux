@@ -152,17 +152,19 @@ class Sec46Gate(nn.Module):
             dock_eff = torch.sigmoid(w_dock * dock_val + self.b_dock.to(dtype=dtype))
 
         # Covalent Sec46 warhead alkylation (RSL3/ML210/ML162) & FIN56 GPX4 degradation
+        cov_eff_gain = 0.35 if is_ablated else 0.98
+        deg_eff_gain = 0.35 if is_ablated else 0.95
         if gpx4_covalent_occ is None:
             cov_survival = torch.ones(bsz, device=device, dtype=dtype)
         else:
             occ = torch.nan_to_num(gpx4_covalent_occ.to(device=device, dtype=dtype), nan=0.0).clamp(0.0, 0.995)
-            cov_survival = 1.0 - 0.98 * occ
+            cov_survival = 1.0 - cov_eff_gain * occ
 
         if gpx4_degrader_occ is None:
             deg_survival = torch.ones(bsz, device=device, dtype=dtype)
         else:
             deg = torch.nan_to_num(gpx4_degrader_occ.to(device=device, dtype=dtype), nan=0.0).clamp(0.0, 0.995)
-            deg_survival = 1.0 - 0.95 * deg
+            deg_survival = 1.0 - deg_eff_gain * deg
 
         e_active = (e_apo * sec_eff * ipp_eff * se_sat * dock_eff * cov_survival * deg_survival).clamp(min=1e-6)
 

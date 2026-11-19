@@ -49,11 +49,11 @@
       "status": "VERIFIED-CLEAN",
       "passed": true,
       "details": {
-        "flux_proposal_net_grad_norm": 7.305444,
-        "other_17_rcd_grad_norm": 1.8e-05,
+        "flux_proposal_net_grad_norm": 6.468794,
+        "other_17_rcd_grad_norm": 8e-06,
         "decoded_zero_dose_um": 0.0,
         "ode_12step_vs_120step_rel_err": 0.0,
-        "max_sv_residual": 9.503864675222597e-15
+        "max_sv_residual": 9.145154692389874e-15
       }
     },
     {
@@ -76,7 +76,7 @@
       "passed": true,
       "details": {
         "iron_free_cdot_increases_lyso_fe2": true,
-        "min_irreversible_flux": 3.35e-05
+        "min_irreversible_flux": 0.0007261
       }
     },
     {

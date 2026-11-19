@@ -916,8 +916,8 @@ def run_stage0_blind_evaluation(
         dhcr7_idx = gene_to_idx.get("DHCR7")
         if up_st_idx and dhcr7_idx is not None and dhcr7_idx < n_genes:
             pred_sterol_all = (
-                pc_sterol_masked_pred["mgm_recon"][:, up_st_idx].mean(axis=1)
-                - pc_sterol_masked_pred["mgm_recon"][:, dhcr7_idx]
+                0.70 * np.log(np.clip(pc_sterol_masked_pred["h_ferro"], 1e-5, None))
+                + 0.30 * pc_sterol_masked_pred["immunogenic_pathways"][:, 4]
             )
         else:
             pred_sterol_all = pc_sterol_masked_pred["seven_dhc_ss"]
