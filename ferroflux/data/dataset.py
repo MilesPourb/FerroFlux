@@ -1192,18 +1192,25 @@ class FerroFluxMultimodalDataset(Dataset):
                 if pd.isna(zip_val) or not np.isfinite(float(zip_val)):
                     continue
                 c_sm1, ik1, sc1 = canonicalize_smiles_and_keys(sm1) if sm1 else ("", "", "")
+                c_sm2, ik2, sc2 = canonicalize_smiles_and_keys(sm2) if sm2 else ("", "", "")
+                sc_a = sc1 if sc1 else self._chem_lookup.get(d1, ("", d1))[1]
+                sc_b = sc2 if sc2 else self._chem_lookup.get(d2, ("", d2))[1]
                 buckets["synergy"].append(
                     {
                         "kind": "synergy",
                         "model_id": mid,
                         "lineage": self._cell_lineage.get(mid, "Unknown"),
                         "smiles_a": c_sm1 if c_sm1 else sm1,
-                        "smiles_b": sm2,
+                        "smiles_b": c_sm2 if c_sm2 else sm2,
+                        "ik14_a": ik1,
+                        "ik14_b": ik2,
+                        "murcko_scaffold_a": sc_a,
+                        "murcko_scaffold_b": sc_b,
                         "synergy_score": float(np.clip(float(zip_val) / 25.0, -4.0, 4.0)),
                         "is_3d_organoid": 0,
                         "is_crispr_fin_epistasis": 0,
                         "is_ferroptosis_compound": 1,
-                        "murcko_scaffold": sc1 if sc1 else self._chem_lookup.get(d1, ("", d1))[1],
+                        "murcko_scaffold": sc_a,
                         "ik14": ik1,
                     }
                 )
@@ -1526,8 +1533,29 @@ class FerroFluxMultimodalDataset(Dataset):
     # ------------------------------------------------------------------
     # Six Strictly Disjoint Out-Of-Distribution (OOD) Splitters
     # ------------------------------------------------------------------
+    @staticmethod
+    def _chem_token_hits(
+        smi: str,
+        ik14: str,
+        scaf: str,
+        held_scaf: set[str],
+        held_smi: set[str],
+        held_ik: set[str],
+    ) -> bool:
+        if scaf and scaf in held_scaf:
+            return True
+        if smi and smi in held_smi:
+            return True
+        if ik14 and ik14 in held_ik:
+            return True
+        if smi and smi.lower() != "nan":
+            c_s, c_ik, c_sc = canonicalize_smiles_and_keys(smi)
+            if (c_sc and c_sc in held_scaf) or (c_s and c_s in held_smi) or (c_ik and c_ik in held_ik):
+                return True
+        return False
+
     def scaffold_split(self, test_frac: float = 0.2, seed: int = 42) -> tuple[list[int], list[int]]:
-        """Hold out 20% of unique Bemis-Murcko scaffolds strictly into test (zero SMILES, ik14, or scaffold overlap)."""
+        """Hold out 20% of unique Bemis-Murcko scaffolds strictly into test (zero SMILES, ik14, or scaffold overlap across ALL drugs)."""
         ferro_scaffolds = sorted(
             {
                 r["murcko_scaffold"]
@@ -1538,7 +1566,7 @@ class FerroFluxMultimodalDataset(Dataset):
             }
         )
         scaffolds = ferro_scaffolds if len(ferro_scaffolds) >= 5 else sorted(
-            {r["murcko_scaffold"] for r in self.records if r.get("murcko_scaffold")}
+            {r["murcko_scaffold"] for r in self.records if r.get("kind") != "synergy" and r.get("murcko_scaffold")}
         )
         if len(scaffolds) >= 2:
             rng = np.random.default_rng(seed)
@@ -1548,23 +1576,53 @@ class FerroFluxMultimodalDataset(Dataset):
             held_out_smiles = {
                 r.get("canonical_smiles", "")
                 for r in self.records
-                if r.get("murcko_scaffold") in held_out and r.get("canonical_smiles")
+                if r.get("kind") != "synergy" and r.get("murcko_scaffold") in held_out and r.get("canonical_smiles")
             }
             held_out_ik14 = {
                 r.get("ik14", "")
                 for r in self.records
-                if (r.get("murcko_scaffold") in held_out or r.get("canonical_smiles") in held_out_smiles)
+                if r.get("kind") != "synergy"
+                and (r.get("murcko_scaffold") in held_out or r.get("canonical_smiles") in held_out_smiles)
                 and r.get("ik14")
             }
-            test_idx = [
-                i
-                for i, r in enumerate(self.records)
-                if r.get("murcko_scaffold") in held_out
-                or (r.get("canonical_smiles") and r.get("canonical_smiles") in held_out_smiles)
-                or (r.get("ik14") and r.get("ik14") in held_out_ik14)
-            ]
-            te_set = set(test_idx)
-            train_idx = [i for i in range(len(self.records)) if i not in te_set]
+            train_idx: list[int] = []
+            test_idx: list[int] = []
+            for i, r in enumerate(self.records):
+                if r.get("kind") == "synergy":
+                    hit_a = self._chem_token_hits(
+                        str(r.get("smiles_a") or ""),
+                        str(r.get("ik14_a") or r.get("ik14") or ""),
+                        str(r.get("murcko_scaffold_a") or r.get("murcko_scaffold") or ""),
+                        held_out,
+                        held_out_smiles,
+                        held_out_ik14,
+                    )
+                    hit_b = self._chem_token_hits(
+                        str(r.get("smiles_b") or ""),
+                        str(r.get("ik14_b") or ""),
+                        str(r.get("murcko_scaffold_b") or ""),
+                        held_out,
+                        held_out_smiles,
+                        held_out_ik14,
+                    )
+                    if hit_a and hit_b:
+                        test_idx.append(i)
+                    elif not hit_a and not hit_b:
+                        train_idx.append(i)
+                    # Boundary synergy pairs (1 train drug + 1 held-out test drug) are quarantined from both!
+                else:
+                    smi_v = str(r.get("canonical_smiles") or r.get("fin_modifier_smiles") or "")
+                    if self._chem_token_hits(
+                        smi_v,
+                        str(r.get("ik14") or ""),
+                        str(r.get("murcko_scaffold") or ""),
+                        held_out,
+                        held_out_smiles,
+                        held_out_ik14,
+                    ):
+                        test_idx.append(i)
+                    else:
+                        train_idx.append(i)
             if train_idx and test_idx:
                 return train_idx, test_idx
         mid = max(1, int(len(self.records) * (1.0 - test_frac)))
@@ -1643,7 +1701,8 @@ class FerroFluxMultimodalDataset(Dataset):
         held_smiles = {
             r.get("canonical_smiles", "")
             for r in self.records
-            if (
+            if r.get("kind") != "synergy"
+            and (
                 r.get("murcko_scaffold") in held_scaffolds
                 or (
                     r.get("kind") == "pharmaco"
@@ -1655,19 +1714,52 @@ class FerroFluxMultimodalDataset(Dataset):
         held_ik14 = {
             r.get("ik14", "")
             for r in self.records
-            if (r.get("canonical_smiles") in held_smiles or r.get("murcko_scaffold") in held_scaffolds)
+            if r.get("kind") != "synergy"
+            and (r.get("canonical_smiles") in held_smiles or r.get("murcko_scaffold") in held_scaffolds)
             and r.get("ik14")
         }
-        test_idx = [
-            i
-            for i, r in enumerate(self.records)
-            if (r.get("canonical_smiles") and r.get("canonical_smiles") in held_smiles)
-            or (r.get("murcko_scaffold") and r.get("murcko_scaffold") in held_scaffolds)
-            or (r.get("ik14") and r.get("ik14") in held_ik14)
-            or (r.get("kind") == "crispr" and str(r.get("fin_modifier_compound", "")).upper() in ("ELESCLOMOL", "DISULFIRAM", "AURANOFIN"))
-        ]
-        te_set = set(test_idx)
-        train_idx = [i for i in range(len(self.records)) if i not in te_set]
+        train_idx: list[int] = []
+        test_idx: list[int] = []
+        for i, r in enumerate(self.records):
+            if r.get("kind") == "synergy":
+                hit_a = self._chem_token_hits(
+                    str(r.get("smiles_a") or ""),
+                    str(r.get("ik14_a") or r.get("ik14") or ""),
+                    str(r.get("murcko_scaffold_a") or r.get("murcko_scaffold") or ""),
+                    held_scaffolds,
+                    held_smiles,
+                    held_ik14,
+                )
+                hit_b = self._chem_token_hits(
+                    str(r.get("smiles_b") or ""),
+                    str(r.get("ik14_b") or ""),
+                    str(r.get("murcko_scaffold_b") or ""),
+                    held_scaffolds,
+                    held_smiles,
+                    held_ik14,
+                )
+                if hit_a and hit_b:
+                    test_idx.append(i)
+                elif not hit_a and not hit_b:
+                    train_idx.append(i)
+            else:
+                smi_v = str(r.get("canonical_smiles") or r.get("fin_modifier_smiles") or "")
+                is_mod_hit = r.get("kind") == "crispr" and str(r.get("fin_modifier_compound", "")).upper() in (
+                    "ELESCLOMOL",
+                    "DISULFIRAM",
+                    "AURANOFIN",
+                )
+                if is_mod_hit or self._chem_token_hits(
+                    smi_v,
+                    str(r.get("ik14") or ""),
+                    str(r.get("murcko_scaffold") or ""),
+                    held_scaffolds,
+                    held_smiles,
+                    held_ik14,
+                ):
+                    test_idx.append(i)
+                else:
+                    train_idx.append(i)
         if not test_idx or not train_idx:
             mid = max(1, int(len(self.records) * 0.90))
             return list(range(0, mid)), list(range(mid, len(self.records)))

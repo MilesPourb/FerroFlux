@@ -196,7 +196,7 @@ class DifferentiableRankAndCorrelationLoss(nn.Module):
 class FerroFluxCurriculumLoss(nn.Module):
     """Unified 4-stage mechanistic + differentiable ranking & APHYNITY curriculum loss (v3)."""
 
-    def __init__(self, huber_delta: float = 1.0, aphynity_lambda: float = 2e-4) -> None:
+    def __init__(self, huber_delta: float = 1.0, aphynity_lambda: float = 3e-3) -> None:
         super().__init__()
         self.huber_delta = float(huber_delta)
         self.aphynity_lambda = float(aphynity_lambda)
@@ -217,14 +217,17 @@ class FerroFluxCurriculumLoss(nn.Module):
             raise ValueError(f"Curriculum stage must be in (1, 2, 3, 4), got {stage!r}")
 
         gene_expr = torch.nan_to_num(batch["gene_expr"], nan=0.0, posinf=20.0, neginf=-20.0)
-        mgm_mask = outputs.get("mgm_eval_mask", batch.get("gene_mask", batch.get("expr_mask")))
+        mgm_mask = outputs.get("mgm_eval_mask")
 
-        mgm_huber, has_mgm = _masked_huber(
-            outputs["mgm_recon"],
-            gene_expr,
-            mask=mgm_mask,
-            delta=self.huber_delta,
-        )
+        if mgm_mask is not None:
+            mgm_huber, has_mgm = _masked_huber(
+                outputs["mgm_recon"],
+                gene_expr,
+                mask=mgm_mask,
+                delta=self.huber_delta,
+            )
+        else:
+            mgm_huber, has_mgm = gene_expr.new_zeros(()), False
         mgm_corr = mgm_huber.new_zeros(())
         if has_mgm and outputs["mgm_recon"].shape[0] >= 4:
             # Across-sample gene co-expression correlation on masked genes (drives Stage-0 pathway reconstruction!)

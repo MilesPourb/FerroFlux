@@ -44,13 +44,14 @@ from ferroflux.baselines.tabular_and_chem_baselines import (
     XGBoostMultiOmicBaseline,
     extract_multimodal_arrays,
 )
-from ferroflux.data.dataset import get_fast_indexer
+from ferroflux.data.dataset import canonicalize_smiles_and_keys, get_fast_indexer
 from ferroflux.models.ferroflux_fm import FerroFluxFM
 from ferroflux.models.losses import FerroFluxCurriculumLoss
 from ferroflux.security.quarantine import audit_parquet_directory
 from ferroflux.training.train_curriculum import (
     _move_batch_to_device,
     _resolve_device,
+    calibrate_mgm_decoder_from_train_indices,
     compute_sar_replay_loss,
     fit_post_curriculum_greybox_from_train_indices,
     load_training_dataset,
@@ -275,14 +276,15 @@ def _extract_forbidden_test_chemistry(
     te_indices: list[int],
     split_name: str,
 ) -> tuple[set[str], set[str], set[str]]:
-    """Collect EVERY held-out SMILES, InChIKey-14, and (for scaffold/chemotype splits) Murcko scaffold."""
-    if not _has_records(dataset):
+    """Collect EVERY held-out SMILES, InChIKey-14, and Murcko scaffold on chemical/chemotype OOD splits."""
+    is_chem_split = split_name in ("1_leave_out_scaffold", "5_cuproptosis_elesclomol_specificity")
+    if not is_chem_split or not _has_records(dataset):
         return set(), set(), set()
     recs = dataset.records
     f_smi: set[str] = set()
     f_ik14: set[str] = set()
     f_scaf: set[str] = set()
-    exclude_scaf = split_name in ("1_leave_out_scaffold", "5_cuproptosis_elesclomol_specificity")
+    exclude_scaf = True
 
     for i in te_indices:
         rc = recs[i]
@@ -290,14 +292,22 @@ def _extract_forbidden_test_chemistry(
             sv = str(rc.get(k_s, "") or "").strip()
             if sv and sv.lower() != "nan":
                 f_smi.add(sv)
+                c_s, ik_s, sc_s = canonicalize_smiles_and_keys(sv)
+                if c_s:
+                    f_smi.add(c_s)
+                if ik_s:
+                    f_ik14.add(ik_s)
+                if exclude_scaf and sc_s:
+                    f_scaf.add(sc_s)
         for k_ik in ("ik14", "ik14_a", "ik14_b"):
             iv = str(rc.get(k_ik, "") or "").strip()[:14]
             if iv and iv.lower() != "nan":
                 f_ik14.add(iv)
         if exclude_scaf:
-            scv = str(rc.get("murcko_scaffold", "") or "").strip()
-            if scv and scv.lower() != "nan":
-                f_scaf.add(scv)
+            for k_sc in ("murcko_scaffold", "murcko_scaffold_a", "murcko_scaffold_b"):
+                scv = str(rc.get(k_sc, "") or "").strip()
+                if scv and scv.lower() != "nan":
+                    f_scaf.add(scv)
     return f_smi, f_ik14, f_scaf
 
 
@@ -333,12 +343,48 @@ def _build_six_ood_splits(dataset: Any, max_samples: int | None = None) -> dict[
         if _has_records(dataset):
             recs = dataset.records
             if sname in ("1_leave_out_scaffold", "5_cuproptosis_elesclomol_specificity"):
-                tr_smi = {recs[i].get("canonical_smiles") for i in tr_l if recs[i].get("canonical_smiles")}
-                te_smi = {recs[i].get("canonical_smiles") for i in te_l if recs[i].get("canonical_smiles")}
+                smi_keys = ("canonical_smiles", "fin_modifier_smiles", "smiles_a", "smiles_b")
+                ik_keys = ("ik14", "ik14_a", "ik14_b")
+                scaf_keys = ("murcko_scaffold", "murcko_scaffold_a", "murcko_scaffold_b")
+                tr_smi = {
+                    str(recs[i].get(ks)).strip()
+                    for i in tr_l
+                    for ks in smi_keys
+                    if recs[i].get(ks) and str(recs[i].get(ks)).strip().lower() != "nan"
+                }
+                te_smi = {
+                    str(recs[i].get(ks)).strip()
+                    for i in te_l
+                    for ks in smi_keys
+                    if recs[i].get(ks) and str(recs[i].get(ks)).strip().lower() != "nan"
+                }
                 assert tr_smi.isdisjoint(te_smi), f"SMILES leak in {sname}: {len(tr_smi & te_smi)}"
-                tr_ik = {recs[i].get("ik14") for i in tr_l if recs[i].get("ik14")}
-                te_ik = {recs[i].get("ik14") for i in te_l if recs[i].get("ik14")}
+                tr_ik = {
+                    str(recs[i].get(ki)).strip()[:14]
+                    for i in tr_l
+                    for ki in ik_keys
+                    if recs[i].get(ki) and str(recs[i].get(ki)).strip().lower() != "nan"
+                }
+                te_ik = {
+                    str(recs[i].get(ki)).strip()[:14]
+                    for i in te_l
+                    for ki in ik_keys
+                    if recs[i].get(ki) and str(recs[i].get(ki)).strip().lower() != "nan"
+                }
                 assert tr_ik.isdisjoint(te_ik), f"InChIKey-14 connectivity leak in {sname}: {len(tr_ik & te_ik)}"
+                tr_sc = {
+                    str(recs[i].get(ksc)).strip()
+                    for i in tr_l
+                    for ksc in scaf_keys
+                    if recs[i].get(ksc) and str(recs[i].get(ksc)).strip().lower() != "nan"
+                }
+                te_sc = {
+                    str(recs[i].get(ksc)).strip()
+                    for i in te_l
+                    for ksc in scaf_keys
+                    if recs[i].get(ksc) and str(recs[i].get(ksc)).strip().lower() != "nan"
+                }
+                assert tr_sc.isdisjoint(te_sc), f"Murcko scaffold leak in {sname}: {len(tr_sc & te_sc)}"
             elif sname in ("2_leave_out_lineage_ccrcc_melanoma", "3_2d_to_3d_organoid_pdx", "6_sfti_tumor_vs_normal_til"):
                 tr_m = {recs[i].get("model_id") for i in tr_l if recs[i].get("model_id") not in (None, "", "__UNMATCHED__")}
                 te_m = {recs[i].get("model_id") for i in te_l if recs[i].get("model_id") not in (None, "", "__UNMATCHED__")}
@@ -591,6 +637,9 @@ def _train_strict_oos_model(
             dataset,
             train_indices,
             forbid_test_set=forbid_test_set,
+            forbid_smiles=forbid_smiles,
+            forbid_ik14=forbid_ik14,
+            forbid_scaffolds=forbid_scaffolds,
             device=device,
             seed=seed,
         )
@@ -633,7 +682,10 @@ def _train_strict_oos_model(
         elif (
             n.startswith("diff_ferro_gem.aphynity_scaf_")
             or n.startswith("perturbation_op.chem_scaffold_")
-            or n == "diff_ferro_gem.raw_scaf_gb_blend"
+            or n in (
+                "diff_ferro_gem.raw_scaf_gb_blend",
+                "diff_ferro_gem.raw_scaf_gb_blend_ood",
+            )
         ):
             greybox_params.append(p)
         elif n.startswith("perturbation_op.sar_pretrain_head."):
@@ -644,16 +696,15 @@ def _train_strict_oos_model(
             dense_params.append(p)
 
     is_pure_chronos = target_kind == "chronos_fitness" and split_name != "4_dual_crispr_fin_epistasis"
-    eff_wd = 0.012 if split_name == "1_leave_out_scaffold" else 0.005
+    eff_wd = 0.008
     param_groups: list[dict[str, Any]] = [
         {"params": dense_params, "lr": base_lr * (0.18 if is_pure_chronos else 1.0), "weight_decay": eff_wd}
     ]
     if greybox_params:
-        gb_mult = 0.08 if split_name == "1_leave_out_scaffold" else (0.12 if is_pure_chronos else 0.18)
         param_groups.append(
             {
                 "params": greybox_params,
-                "lr": base_lr * gb_mult,
+                "lr": base_lr * (0.12 if is_pure_chronos else 0.15),
                 "weight_decay": 1.5e-2,
             }
         )
@@ -661,13 +712,12 @@ def _train_strict_oos_model(
         param_groups.append(
             {
                 "params": ecfp_shared_params,
-                "lr": base_lr * (0.06 if split_name == "1_leave_out_scaffold" else 0.12),
+                "lr": base_lr * 0.10,
                 "weight_decay": 5.0e-2,
             }
         )
     if sar_backbone_params:
-        sar_mult = 0.35 if split_name == "1_leave_out_scaffold" else 0.65
-        param_groups.append({"params": sar_backbone_params, "lr": base_lr * sar_mult, "weight_decay": 1e-3})
+        param_groups.append({"params": sar_backbone_params, "lr": base_lr * 0.38, "weight_decay": 1e-3})
     if sar_head_params:
         param_groups.append({"params": sar_head_params, "lr": base_lr * 0.06, "weight_decay": 1e-4})
     if anchor_params:
@@ -686,33 +736,24 @@ def _train_strict_oos_model(
     )
     fast_idxr = get_fast_indexer(dataset) if (_has_records(dataset) and not smoke_test) else None
     rng_tr = np.random.default_rng(seed + 17)
-    batch_sz = 192 if (_has_records(dataset) and not smoke_test) else 32
+    batch_sz = 256 if (_has_records(dataset) and not smoke_test) else 32
     if smoke_test:
         stage_plan = [(1, 1, 1, 6), (2, 1, 2, 6), (3, 1, 3, 6), (4, 1, 4, 6)]
     elif is_pure_chronos:
-        ep_main = max(2, int(epochs))
+        ep_main = max(3, int(epochs))
         stage_plan = [
-            (1, 1, 1, 28),
-            (2, ep_main, 2, 60),
-            (5, 2, 2, 45),
-        ]
-    elif split_name == "4_dual_crispr_fin_epistasis":
-        ep_main = max(2, int(epochs))
-        stage_plan = [
-            (1, 1, 1, 20),
-            (2, ep_main, 2, 48),
-            (3, ep_main, 3, 65),
-            (4, 1, 4, 22),
-            (5, 4, 3, 85),
+            (1, 1, 1, 32),
+            (2, ep_main, 2, 76),
+            (5, 2, 2, 60),
         ]
     else:
-        ep_main = max(2, int(epochs))
+        ep_main = max(3, int(epochs))
         stage_plan = [
-            (1, 1, 1, 20),
-            (2, ep_main, 2, 48),
-            (3, ep_main, 3, 65),
-            (4, 1, 4, 22),
-            (5, 4, 3, 85),
+            (1, 1, 1, 24),
+            (2, ep_main, 2, 52),
+            (3, ep_main, 3, 72),
+            (4, 1, 4, 24),
+            (5, 4, 3, 92),
         ]
 
     total_steps = sum(
@@ -769,7 +810,7 @@ def _train_strict_oos_model(
                 if step_i >= max_steps_cap:
                     break
                 b = raw_b if loader is None else _move_batch_to_device(raw_b, device)
-                b["enable_mgm_masking"] = bool(pool_key == 1)
+                b["enable_mgm_masking"] = bool(pool_key == 1 or (pool_key == 4 and step_i % 2 == 0))
                 opt.zero_grad(set_to_none=True)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                     out = model(b)
@@ -815,6 +856,10 @@ def _train_strict_oos_model(
         model.load_state_dict(swa_state)
 
     if not smoke_test and _has_records(dataset):
+        with torch.no_grad():
+            model.perturbation_op.cell_bioact_film[-1].weight.mul_(0.18)
+            if model.perturbation_op.cell_bioact_film[-1].bias is not None:
+                model.perturbation_op.cell_bioact_film[-1].bias.mul_(0.18)
         if is_pure_chronos:
             warmstart_crispr_joint_and_svd(
                 model,
@@ -825,15 +870,31 @@ def _train_strict_oos_model(
                 seed=seed,
             )
         elif target_kind == "viability":
+            inc_nf = any(
+                dataset.records[int(i)].get("kind") == "pharmaco"
+                and int(dataset.records[int(i)].get("is_ferroptosis_compound", 1)) == 0
+                for i in stage_pools[5]
+            )
             fit_post_curriculum_greybox_from_train_indices(
                 model,
                 dataset,
                 train_indices,
                 forbid_test_set=forbid_test_set,
-                split_name=split_name,
+                forbid_smiles=forbid_smiles,
+                forbid_ik14=forbid_ik14,
+                forbid_scaffolds=forbid_scaffolds,
+                include_non_ferro=inc_nf,
                 device=device,
                 seed=seed,
             )
+        calibrate_mgm_decoder_from_train_indices(
+            model,
+            dataset,
+            train_indices,
+            forbid_test_set=forbid_test_set,
+            device=device,
+            seed=seed,
+        )
     model.eval()
     if not smoke_test:
         print(
@@ -1129,9 +1190,99 @@ def main(argv: list[str] | None = None) -> int:
             )
             collate_fn = dataset.collate_fn
             n_genes = dataset.n_genes
+        splits = _build_six_ood_splits(dataset, max_samples=args.max_eval_samples)
+        if args.save_oos_ckpt_dir is not None:
+            print(f"[OOD-v3] Loaded {len(dataset)} harmonized records for track={track!r} (fast ckpt-train mode).", flush=True)
+            args.save_oos_ckpt_dir.mkdir(parents=True, exist_ok=True)
+            if args.only_ablation_idx is None:
+                for split_idx, (canon_split, _) in enumerate(CANONICAL_6_OOD_SPLITS):
+                    if args.only_split is not None and canon_split != args.only_split:
+                        continue
+                    tr_idx, te_idx_full = splits[canon_split]
+                    forbid_te = set(te_idx_full)
+                    f_smi, f_ik14, f_scaf = _extract_forbidden_test_chemistry(dataset, te_idx_full, canon_split)
+                    target_kind = (
+                        "chronos_fitness"
+                        if canon_split in ("3_2d_to_3d_organoid_pdx", "4_dual_crispr_fin_epistasis")
+                        else "viability"
+                    )
+                    for s_val in seeds_use:
+                        eff_sd = s_val + split_idx * 10
+                        t_sd0 = time.perf_counter()
+                        m_tr = _train_strict_oos_model(
+                            dataset=dataset,
+                            train_indices=tr_idx,
+                            forbid_test_set=forbid_te,
+                            collate_fn=collate_fn,
+                            n_genes=n_genes,
+                            model_size=args.model_size,
+                            config_path=args.config,
+                            device=device,
+                            data_dir=args.data_dir,
+                            license_track=track,
+                            split_name=canon_split,
+                            target_kind=target_kind,
+                            forbid_smiles=f_smi,
+                            forbid_ik14=f_ik14,
+                            forbid_scaffolds=f_scaf,
+                            epochs=args.epochs,
+                            sar_epochs=args.sar_epochs,
+                            seed=eff_sd,
+                            smoke_test=bool(args.smoke_test),
+                        )
+                        out_p = args.save_oos_ckpt_dir / f"oos_{track}_{canon_split}_{eff_sd}.pt"
+                        tmp_p = out_p.with_name(f".tmp_{os.getpid()}_{out_p.name}")
+                        torch.save(
+                            {"state_dict": m_tr.cpu().state_dict(), "train_sec": round(time.perf_counter() - t_sd0, 2)},
+                            tmp_p,
+                        )
+                        tmp_p.replace(out_p)
+            run_abl_ckpt = (not args.skip_ablations) and (
+                args.only_ablation_idx is not None or (args.only_split is None and track == tracks_run[0])
+            )
+            if run_abl_ckpt:
+                abl_split_name = "2_leave_out_lineage_ccrcc_melanoma"
+                ref_tr, ref_te_full = splits[abl_split_name]
+                ref_forbid = set(ref_te_full)
+                ref_f_smi, ref_f_ik14, ref_f_scaf = _extract_forbidden_test_chemistry(dataset, ref_te_full, abl_split_name)
+                for abl_idx, (_, abl_flags) in enumerate(ABLATION_9_SPECS):
+                    if args.only_ablation_idx is not None and abl_idx != args.only_ablation_idx:
+                        continue
+                    for s_val in seeds_use:
+                        t_sd0 = time.perf_counter()
+                        m_abl = _train_strict_oos_model(
+                            dataset=dataset,
+                            train_indices=ref_tr,
+                            forbid_test_set=ref_forbid,
+                            collate_fn=collate_fn,
+                            n_genes=n_genes,
+                            model_size=args.model_size,
+                            config_path=args.config,
+                            device=device,
+                            data_dir=args.data_dir,
+                            license_track=track,
+                            split_name=abl_split_name,
+                            target_kind="viability",
+                            forbid_smiles=ref_f_smi,
+                            forbid_ik14=ref_f_ik14,
+                            forbid_scaffolds=ref_f_scaf,
+                            epochs=args.epochs,
+                            sar_epochs=args.sar_epochs,
+                            ablation_kw=abl_flags,
+                            seed=s_val,
+                            smoke_test=bool(args.smoke_test),
+                        )
+                        out_p = args.save_oos_ckpt_dir / f"oos_abl{abl_idx}_{track}_{s_val}.pt"
+                        tmp_p = out_p.with_name(f".tmp_{os.getpid()}_{out_p.name}")
+                        torch.save(
+                            {"state_dict": m_abl.cpu().state_dict(), "train_sec": round(time.perf_counter() - t_sd0, 2)},
+                            tmp_p,
+                        )
+                        tmp_p.replace(out_p)
+            continue
+
         arrays = extract_multimodal_arrays(dataset, max_samples=args.max_eval_samples)
         print(f"[OOD-v3] Extracted {len(dataset)} harmonized records for track={track!r}.", flush=True)
-        splits = _build_six_ood_splits(dataset, max_samples=args.max_eval_samples)
 
         m_viab_all = arrays["viability_mask"] > 0.5
         m_chr_all = arrays["chronos_mask"] > 0.5
@@ -1194,6 +1345,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.save_oos_ckpt_dir.mkdir(parents=True, exist_ok=True)
                     for s_val in seeds_use:
                         eff_sd = s_val + split_idx * 10
+                        t_sd0 = time.perf_counter()
                         m_tr = _train_strict_oos_model(
                             dataset=dataset,
                             train_indices=tr_idx,
@@ -1215,7 +1367,10 @@ def main(argv: list[str] | None = None) -> int:
                             seed=eff_sd,
                             smoke_test=bool(args.smoke_test),
                         )
-                        torch.save(m_tr.cpu().state_dict(), args.save_oos_ckpt_dir / f"oos_{track}_{canon_split}_{eff_sd}.pt")
+                        torch.save(
+                            {"state_dict": m_tr.cpu().state_dict(), "train_sec": round(time.perf_counter() - t_sd0, 2)},
+                            args.save_oos_ckpt_dir / f"oos_{track}_{canon_split}_{eff_sd}.pt",
+                        )
                     continue
 
                 # 1. Fit & evaluate all 6 Reviewer #2 baselines at full convergence on EXACT `eval_idx`
@@ -1289,6 +1444,7 @@ def main(argv: list[str] | None = None) -> int:
                     gc.collect()
 
                 # 2. Train strictly Out-of-Sample FerroFlux-FM v3 ensemble from scratch on `tr_idx` ONLY
+                extra_train_sec = 0.0
                 if args.load_oos_ckpt_dir is not None:
                     oos_ensemble = []
                     for s_val in seeds_use:
@@ -1299,7 +1455,13 @@ def main(argv: list[str] | None = None) -> int:
                         else:
                             m_ld = FerroFluxFM.from_config(config_path=args.config, variant=args.model_size, n_genes=n_genes).to(device)
                         sd_p = args.load_oos_ckpt_dir / f"oos_{track}_{canon_split}_{eff_sd}.pt"
-                        m_ld.load_state_dict(torch.load(sd_p, map_location=device, weights_only=False), strict=True)
+                        raw_obj = torch.load(sd_p, map_location=device, weights_only=False)
+                        if isinstance(raw_obj, dict) and "state_dict" in raw_obj:
+                            sd_dict = raw_obj["state_dict"]
+                            extra_train_sec += float(raw_obj.get("train_sec", 0.0))
+                        else:
+                            sd_dict = raw_obj
+                        m_ld.load_state_dict(sd_dict, strict=True)
                         m_ld.eval()
                         oos_ensemble.append(m_ld)
                 else:
@@ -1393,7 +1555,7 @@ def main(argv: list[str] | None = None) -> int:
                         "best_baseline_spearman": round(best_b_rho, 4),
                         "delta_spearman_vs_best_baseline": round(delta_rho, 4),
                         "p_value_vs_best_baseline": round(p_perm, 6),
-                        "eval_sec": round(time.perf_counter() - t_split, 2),
+                        "eval_sec": round(time.perf_counter() - t_split + extra_train_sec, 2),
                     }
                 )
                 print(
@@ -1432,31 +1594,85 @@ def main(argv: list[str] | None = None) -> int:
                 if args.only_ablation_idx is not None and abl_idx != args.only_ablation_idx:
                     continue
                 t_abl = time.perf_counter()
-                abl_models = [
-                    _train_strict_oos_model(
-                        dataset=dataset,
-                        train_indices=ref_tr,
-                        forbid_test_set=ref_forbid,
-                        collate_fn=collate_fn,
-                        n_genes=n_genes,
-                        model_size=args.model_size,
-                        config_path=args.config,
-                        device=device,
-                        data_dir=args.data_dir,
-                        license_track=track,
-                        split_name=abl_split_name,
-                        target_kind=ref_target,
-                        forbid_smiles=ref_f_smi,
-                        forbid_ik14=ref_f_ik14,
-                        forbid_scaffolds=ref_f_scaf,
-                        epochs=args.epochs,
-                        sar_epochs=args.sar_epochs,
-                        ablation_kw=abl_flags,
-                        seed=s_val,
-                        smoke_test=bool(args.smoke_test),
-                    )
-                    for s_val in seeds_use
-                ]
+                if args.save_oos_ckpt_dir is not None:
+                    args.save_oos_ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    for s_val in seeds_use:
+                        t_sd0 = time.perf_counter()
+                        m_abl = _train_strict_oos_model(
+                            dataset=dataset,
+                            train_indices=ref_tr,
+                            forbid_test_set=ref_forbid,
+                            collate_fn=collate_fn,
+                            n_genes=n_genes,
+                            model_size=args.model_size,
+                            config_path=args.config,
+                            device=device,
+                            data_dir=args.data_dir,
+                            license_track=track,
+                            split_name=abl_split_name,
+                            target_kind=ref_target,
+                            forbid_smiles=ref_f_smi,
+                            forbid_ik14=ref_f_ik14,
+                            forbid_scaffolds=ref_f_scaf,
+                            epochs=args.epochs,
+                            sar_epochs=args.sar_epochs,
+                            ablation_kw=abl_flags,
+                            seed=s_val,
+                            smoke_test=bool(args.smoke_test),
+                        )
+                        torch.save(
+                            {"state_dict": m_abl.cpu().state_dict(), "train_sec": round(time.perf_counter() - t_sd0, 2)},
+                            args.save_oos_ckpt_dir / f"oos_abl{abl_idx}_{track}_{s_val}.pt",
+                        )
+                    continue
+
+                extra_abl_sec = 0.0
+                if args.load_oos_ckpt_dir is not None:
+                    abl_models = []
+                    for s_val in seeds_use:
+                        sz_l = args.model_size.strip().lower()
+                        if args.smoke_test or sz_l in ("compact", "v2_login"):
+                            m_ld = FerroFluxFM(n_genes=n_genes, d_model=192, n_layers=3, n_heads=4, **abl_flags).to(device)
+                        else:
+                            m_ld = FerroFluxFM.from_config(
+                                config_path=args.config, variant=args.model_size, n_genes=n_genes, **abl_flags
+                            ).to(device)
+                        sd_p = args.load_oos_ckpt_dir / f"oos_abl{abl_idx}_{track}_{s_val}.pt"
+                        raw_obj = torch.load(sd_p, map_location=device, weights_only=False)
+                        if isinstance(raw_obj, dict) and "state_dict" in raw_obj:
+                            sd_dict = raw_obj["state_dict"]
+                            extra_abl_sec += float(raw_obj.get("train_sec", 0.0))
+                        else:
+                            sd_dict = raw_obj
+                        m_ld.load_state_dict(sd_dict, strict=True)
+                        m_ld.eval()
+                        abl_models.append(m_ld)
+                else:
+                    abl_models = [
+                        _train_strict_oos_model(
+                            dataset=dataset,
+                            train_indices=ref_tr,
+                            forbid_test_set=ref_forbid,
+                            collate_fn=collate_fn,
+                            n_genes=n_genes,
+                            model_size=args.model_size,
+                            config_path=args.config,
+                            device=device,
+                            data_dir=args.data_dir,
+                            license_track=track,
+                            split_name=abl_split_name,
+                            target_kind=ref_target,
+                            forbid_smiles=ref_f_smi,
+                            forbid_ik14=ref_f_ik14,
+                            forbid_scaffolds=ref_f_scaf,
+                            epochs=args.epochs,
+                            sar_epochs=args.sar_epochs,
+                            ablation_kw=abl_flags,
+                            seed=s_val,
+                            smoke_test=bool(args.smoke_test),
+                        )
+                        for s_val in seeds_use
+                    ]
                 abl_out = _predict_ensemble_on_exact_indices(
                     abl_models,
                     dataset,
@@ -1509,7 +1725,7 @@ def main(argv: list[str] | None = None) -> int:
                     "lethal_auroc": round(a_auc, 4) if not np.isnan(a_auc) else np.nan,
                     "delta_expr_pearson_r": round(a_dx, 4) if not np.isnan(a_dx) else np.nan,
                     **probes,
-                    "train_eval_sec": round(time.perf_counter() - t_abl, 2),
+                    "train_eval_sec": round(time.perf_counter() - t_abl + extra_abl_sec, 2),
                 }
                 if args.shard_out_prefix is not None:
                     args.shard_out_prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -1554,6 +1770,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             flush=True,
         )
+        return 0
+
+    if args.save_oos_ckpt_dir is not None:
         return 0
 
     ood_qvals = benjamini_hochberg_fdr([r["p_value_vs_best_baseline"] for r in ood_rows])

@@ -369,5 +369,107 @@ def test_v3_round2_sar_snapshot_mgm_shift_invariance_and_apop_identifiability() 
     )
 
 
+def test_v3_round3_synergy_smiles_b_zero_leak_honest_ablations_and_mgm_sterol() -> None:
+    """Verify multi-drug `smiles_b` zero-leakage, orthogonal ablations, affine MGM invariance & pure sterol cross-prediction."""
+    from ferroflux.data.dataset import FerroChemSARPretrainDataset, FerroFluxMultimodalDataset
+    from ferroflux.training.evaluate_ood_and_ablations import _build_six_ood_splits, _extract_forbidden_test_chemistry
+
+    # 1. Multi-drug `synergy` `smiles_b` salt/scaffold zero-leakage across OOD splits & Stage-0.5 SAR
+    ds = FerroFluxMultimodalDataset(
+        data_dir=ROOT_DIR / "data" / "processed", license_track="open", max_samples_per_shard=2500
+    )
+    splits = _build_six_ood_splits(ds)
+    for sp_key in ("1_leave_out_scaffold", "5_cuproptosis_elesclomol_specificity"):
+        tr_idx, te_idx = splits[sp_key]
+        f_smi, f_ik14, f_scaf = _extract_forbidden_test_chemistry(ds, te_idx, sp_key)
+        assert len(f_scaf) >= 1
+        for ti in tr_idx:
+            rc = ds.records[ti]
+            for ks in ("canonical_smiles", "fin_modifier_smiles", "smiles_a", "smiles_b"):
+                sv = str(rc.get(ks, "") or "").strip()
+                assert not sv or sv not in f_smi, f"Leaked {ks} in {sp_key}!"
+            for ki in ("ik14", "ik14_a", "ik14_b"):
+                iv = str(rc.get(ki, "") or "").strip()[:14]
+                assert not iv or iv not in f_ik14, f"Leaked {ki} in {sp_key}!"
+            for ksc in ("murcko_scaffold", "murcko_scaffold_a", "murcko_scaffold_b"):
+                scv = str(rc.get(ksc, "") or "").strip()
+                assert not scv or scv not in f_scaf, f"Leaked {ksc} in {sp_key}!"
+
+    # Synthetic multi-drug salt-form `smiles_b` without pre-populated `murcko_scaffold` must still block shared scaffolds!
+    class _DummySynDS:
+        def __init__(self) -> None:
+            self.records = [
+                {
+                    "kind": "synergy",
+                    "smiles_a": "CCO",
+                    "smiles_b": "C#CCNc1ccc(-c2cc(=O)c3ccccc3o2)cc1.Cl",
+                }
+            ]
+
+        def __len__(self) -> int:
+            return 1
+
+    f_s2, f_ik2, f_sc2 = _extract_forbidden_test_chemistry(_DummySynDS(), [0], "1_leave_out_scaffold")
+    assert "O=c1cc(-c2ccccc2)oc2ccccc12" in f_sc2
+    sar_clean = FerroChemSARPretrainDataset(
+        data_dir=ROOT_DIR / "data" / "processed",
+        license_track="open",
+        forbid_smiles=f_s2,
+        forbid_ik14=f_ik2,
+        forbid_scaffolds=f_sc2,
+    )
+    assert len(sar_clean) > 1000
+
+    # 2. Honest ablation orthogonality: `ablate_sec46_gate` preserves ECFP/MACCS/SAR, and `ablate_cis_reg_slot`
+    #    & `ablate_physical_anchors` NEVER erase observed mRNA (`gx_rel`)!
+    fp_v, desc_v = compute_compound_featurization("CC(=O)Nc1ccc(O)cc1")
+    fp_t = torch.from_numpy(fp_v).unsqueeze(0)
+    desc_t = torch.from_numpy(desc_v).unsqueeze(0)
+    du_t = torch.tensor([2.5])
+    dl_t = torch.tensor([0.4])
+
+    m_full = FerroFluxFM(n_genes=256, d_model=64, n_layers=2, n_heads=2)
+    m_sec = FerroFluxFM(n_genes=256, d_model=64, n_layers=2, n_heads=2, ablate_sec46_gate=True)
+    m_cis = FerroFluxFM(n_genes=256, d_model=64, n_layers=2, n_heads=2, ablate_cis_reg_slot=True)
+    m_anc = FerroFluxFM(n_genes=256, d_model=64, n_layers=2, n_heads=2, ablate_physical_anchors=True)
+    for mod in (m_full, m_sec):
+        mod.perturbation_op.snapshot_stage05_sar_anchor()
+
+    ecfp_sec = m_sec.perturbation_op.build_shared_ecfp_features(fp_t)
+    cd_sec = m_sec.perturbation_op.build_raw_chem_dense_features(fp_t, desc_t, du_t, dl_t)
+    sar_off = m_sec.perturbation_op.chem_desc_dim + m_sec.perturbation_op.maccs_sub_dim
+    assert float(ecfp_sec.abs().sum().item()) > 0.0, "ablate_sec46_gate must NOT zero shared ECFP bits!"
+    assert float(cd_sec[:, sar_off : sar_off + m_sec.perturbation_op.sar_snap_dim].abs().sum().item()) > 0.0, (
+        "ablate_sec46_gate must NOT zero frozen SAR vector!"
+    )
+
+    gx_in = torch.linspace(1.0, 9.0, 256).unsqueeze(0)
+    gm_in = torch.ones_like(gx_in)
+    z28 = torch.zeros(1, 28)
+    z12 = torch.zeros(1, 12)
+    z234 = torch.zeros(1, 234)
+    z64 = torch.ones(1, 64)
+    fc_full, _ = m_full.diff_ferro_gem.build_raw_cell_greybox_features(gx_in, gm_in, z28, z12, z234, z64)
+    fc_cis, _ = m_cis.diff_ferro_gem.build_raw_cell_greybox_features(gx_in, gm_in, z28, z12, z234, z64)
+    fc_anc, _ = m_anc.diff_ferro_gem.build_raw_cell_greybox_features(gx_in, gm_in, z28, z12, z234, z64)
+    assert torch.allclose(fc_full[:, :256], fc_cis[:, :256], atol=1e-6), "ablate_cis_reg must NOT erase mRNA!"
+    assert torch.allclose(fc_full[:, :256], fc_anc[:, :256], atol=1e-6), "ablate_physical_anchors must NOT erase mRNA!"
+
+    # 3. Affine-equivariant `mgm_recon` shift invariance AND absence of `log(h_ferro)` proxy in Stage-0 sterol eval
+    m_full.eval()
+    with torch.no_grad():
+        m_full.mgm_svd_proj.weight.normal_(0.0, 0.05)
+        m_full.mgm_ctx_decoder.weight[:, m_full.d_model :].normal_(0.0, 0.05)
+        r_base = m_full({"gene_expr": gx_in, "gene_mask": gm_in})["mgm_recon"]
+        r_shift = m_full({"gene_expr": gx_in + 4.5, "gene_mask": gm_in})["mgm_recon"]
+    # Shifting observed expression by +4.5 shifts reconstructed z-score back by +4.5 on the affine SVD branch!
+    assert float(((r_shift - r_base) - 4.5).abs().mean().item()) < 0.6
+
+    s0_src = (ROOT_DIR / "ferroflux" / "validation" / "stage0_bradbury_blind_eval.py").read_text(encoding="utf-8")
+    assert 'pc_sterol_masked_pred["h_ferro"]' not in s0_src, "Stage-0 Cohort 3 must NOT use h_ferro proxy!"
+    assert 'pc_sterol_masked_pred["mgm_recon"]' in s0_src
+
+
+
 
 

@@ -298,9 +298,10 @@ def pretrain_stage05_chem_sar(
     act_m_t = torch.from_numpy(sar_ds.active_mask.copy())
     rng = np.random.default_rng(seed)
 
-    # On the open track (where CC BY-NC FerrDb labels in cols 19-20 are sparse/absent), derive
-    # balanced (~750 pos + ~750 neg) open-licensed PubChem qHTS labels + strictly in-split `train_indices`
-    # compound outcomes (`0` SMILES, `ik14`, Murcko scaffold, or test-row overlap).
+    # On the open track (where CC BY-NC FerrDb labels in cols 19-20 are absent/sparse), preserve quantitative
+    # ChEMBL/PubChem potency (`pot_t[:, 19]`) untouched and supervise binary `act_t[:, 19:21]` strictly from
+    # open-licensed PubChem qHTS assays (`HT1080`, `ALOX5/12/15`, `NFE2L2`) + disjoint in-split `train_indices`
+    # ferroptosis modulators (`0` held-out SMILES, `ik14`, Murcko scaffold, or multi-drug `smiles_b` overlap).
     if act_m_t.shape[1] > 20 and float(act_m_t[:, 20].sum().item()) < 5.0:
         killer_cols = [0, 1, 2, 3, 7, 11, 17, 18, 19]
         is_killer = (act_t[:, killer_cols] * act_m_t[:, killer_cols]).max(dim=1).values > 0.5
@@ -310,29 +311,34 @@ def pretrain_stage05_chem_sar(
         is_rta_chel_safe = ((desc_t[:, 7] > 0.0) | (desc_t[:, 8] > 0.0)) & (act_m_t[:, 17] > 0.5) & (act_t[:, 17] < 0.5)
         pos_idx_20 = np.where(((is_alox_nrf2 | is_rta_chel_safe) & (~is_killer)).numpy())[0]
         neg_idx_20 = np.where(is_killer.numpy())[0]
-        if len(pos_idx_20) > 750:
-            pos_idx_20 = np.sort(rng.choice(pos_idx_20, size=750, replace=False))
-        if len(neg_idx_20) > 750:
-            neg_idx_20 = np.sort(rng.choice(neg_idx_20, size=750, replace=False))
-        act_t[pos_idx_20, 20] = 1.0
-        act_m_t[pos_idx_20, 20] = 1.0
-        act_t[neg_idx_20, 20] = 0.0
-        act_m_t[neg_idx_20, 20] = 1.0
+        if len(pos_idx_20) > 450:
+            pos_idx_20 = np.sort(rng.choice(pos_idx_20, size=450, replace=False))
+        if len(neg_idx_20) > 480:
+            neg_idx_20 = np.sort(rng.choice(neg_idx_20, size=480, replace=False))
+        if len(pos_idx_20) > 0:
+            act_t[pos_idx_20, 20] = 1.0
+            act_m_t[pos_idx_20, 20] = 1.0
+        if len(neg_idx_20) > 0:
+            act_t[neg_idx_20, 20] = 0.0
+            act_m_t[neg_idx_20, 20] = 1.0
 
-        if float(act_m_t[:, 19].sum().item()) < 250.0:
-            ht_pos = np.where((((act_t[:, 17] * act_m_t[:, 17]) > 0.5) | ((act_t[:, 18] * act_m_t[:, 18]) > 0.5)).numpy())[0]
-            ht_neg = np.where(((act_m_t[:, 17] > 0.5) & (act_t[:, 17] < 0.5) & (~is_killer)).numpy())[0]
-            if len(ht_pos) > 700:
-                ht_pos = np.sort(rng.choice(ht_pos, size=700, replace=False))
-            if len(ht_neg) > 700:
-                ht_neg = np.sort(rng.choice(ht_neg, size=700, replace=False))
-            act_t[ht_pos, 19] = 1.0
-            act_m_t[ht_pos, 19] = 1.0
+        ht_pos = np.where((((act_t[:, 17] * act_m_t[:, 17]) > 0.5) | ((act_t[:, 18] * act_m_t[:, 18]) > 0.5)).numpy())[0]
+        ht_neg = np.where(((act_m_t[:, 17] > 0.5) & (act_t[:, 17] < 0.5) & (~is_killer) & (act_m_t[:, 19] < 0.5)).numpy())[0]
+        if len(ht_pos) > 480:
+            ht_pos = np.sort(rng.choice(ht_pos, size=480, replace=False))
+        if len(ht_neg) > 360:
+            ht_neg = np.sort(rng.choice(ht_neg, size=360, replace=False))
+        if len(ht_pos) > 0:
+            only_unset = (act_m_t[ht_pos, 19] < 0.5).numpy()
+            if bool(only_unset.any()):
+                act_t[ht_pos[only_unset], 19] = 1.0
+                act_m_t[ht_pos[only_unset], 19] = 1.0
+        if len(ht_neg) > 0:
             act_t[ht_neg, 19] = 0.0
             act_m_t[ht_neg, 19] = 1.0
 
         if train_dataset is not None and train_indices is not None and hasattr(train_dataset, "records"):
-            from ferroflux.data.dataset import canonicalize_smiles_and_keys, get_fast_indexer
+            from ferroflux.data.dataset import get_fast_indexer
 
             if forbid_test_set:
                 assert forbid_test_set.isdisjoint(set(train_indices)), "FATAL: test index in Stage-0.5 train_indices!"
@@ -340,24 +346,19 @@ def pretrain_stage05_chem_sar(
             recs_tr = train_dataset.records
             cmpd_stats: dict[int, list[Any]] = {}
             for ti in train_indices:
-                rec = recs_tr[int(ti)]
+                ti_i = int(ti)
+                rec = recs_tr[ti_i]
                 if rec.get("kind") != "pharmaco" or int(rec.get("is_ferroptosis_compound", 1)) == 0:
                     continue
-                cid = int(idxr_tr.row_chem_a_idx[int(ti)])
-                if cid <= 0:
-                    continue
-                raw_s = str(rec.get("canonical_smiles") or "").strip()
-                c_s, ik_s, sc_s = canonicalize_smiles_and_keys(raw_s)
-                if (
-                    not c_s
-                    or c_s in sar_ds.forbid_smiles
-                    or raw_s in sar_ds.forbid_smiles
-                    or (ik_s and ik_s in sar_ds.forbid_ik14)
-                    or (sar_ds.forbid_scaffolds and sc_s and sc_s in sar_ds.forbid_scaffolds)
+                if _record_hits_forbidden_chemistry(
+                    rec, sar_ds.forbid_smiles, sar_ds.forbid_ik14, sar_ds.forbid_scaffolds
                 ):
                     continue
+                cid = int(idxr_tr.row_chem_a_idx[ti_i])
+                if cid <= 0:
+                    continue
                 rcd_m = str(rec.get("rcd_modality") or "").lower()
-                yv = float(idxr_tr.viability_target[int(ti)])
+                yv = float(idxr_tr.viability_target[ti_i])
                 if cid not in cmpd_stats:
                     cmpd_stats[cid] = [rcd_m, [yv]]
                 else:
@@ -365,24 +366,17 @@ def pretrain_stage05_chem_sar(
             if cmpd_stats:
                 ex_fps, ex_descs, ex_pots, ex_pms, ex_acts, ex_ams = [], [], [], [], [], []
                 n_cols = int(act_t.shape[1])
-                for cid, (rcd_m, y_list) in sorted(cmpd_stats.items()):
+                for cid, (rcd_m, _y_list) in sorted(cmpd_stats.items()):
                     is_resc = "rescuer" in rcd_m
-                    my = float(np.mean(y_list))
-                    pot_est = float(np.clip(4.5 + 3.5 * (1.0 - my), 4.0, 8.5))
                     fp_row = (idxr_tr.chem_fp_table[cid, : fp_t.shape[1]] > 0.5).astype(np.uint8)
                     ds_row = idxr_tr.chem_desc_table[cid, : desc_t.shape[1]].astype(np.float32)
                     p_row = np.zeros(n_cols, dtype=np.float32)
                     pm_row = np.zeros(n_cols, dtype=np.float32)
                     a_row = np.zeros(n_cols, dtype=np.float32)
                     am_row = np.zeros(n_cols, dtype=np.float32)
-                    a_row[19] = 0.0 if is_resc else 1.0
-                    am_row[19] = 1.0
-                    a_row[20] = 1.0 if is_resc else 0.0
-                    am_row[20] = 1.0
-                    if not is_resc:
-                        p_row[19] = pot_est
-                        pm_row[19] = 1.0
-                    for _ in range(14):
+                    a_row[19], am_row[19] = (0.0 if is_resc else 1.0), 1.0
+                    a_row[20], am_row[20] = (1.0 if is_resc else 0.0), 1.0
+                    for _ in range(12):
                         ex_fps.append(fp_row)
                         ex_descs.append(ds_row)
                         ex_pots.append(p_row)
@@ -536,6 +530,88 @@ def _solve_ridge_np(x: np.ndarray, y: np.ndarray, lam: float = 25.0) -> tuple[np
     return w.T.astype(np.float32), b.astype(np.float32)
 
 
+def _solve_zero_bias_ridge_np(x: np.ndarray, y: np.ndarray, mask: np.ndarray | None = None, lam: float = 140.0) -> np.ndarray:
+    """Closed-form zero-intercept Ridge regression returning `weight_out_by_in` (`0.0` when `x == 0`)."""
+    xd = x.astype(np.float64)
+    yd = y.astype(np.float64)
+    d_in = xd.shape[1]
+    d_out = yd.shape[1]
+    w_out = np.zeros((d_out, d_in), dtype=np.float32)
+    eye = np.eye(d_in, dtype=np.float64) * float(lam)
+    if mask is None:
+        if len(xd) >= 8:
+            w = np.linalg.solve(xd.T @ xd + eye, xd.T @ yd)
+            w_out = w.T.astype(np.float32)
+        return w_out
+    for j in range(d_out):
+        mj = mask[:, j] > 0.5
+        if int(mj.sum()) >= 8:
+            xj = xd[mj]
+            yj = yd[mj, j]
+            wj = np.linalg.solve(xj.T @ xj + eye, xj.T @ yj)
+            w_out[j] = wj.astype(np.float32)
+    return w_out
+
+
+def _record_hits_forbidden_chemistry(
+    rec: dict[str, Any],
+    forbid_smiles: set[str] | None,
+    forbid_ik14: set[str] | None,
+    forbid_scaffolds: set[str] | None,
+) -> bool:
+    """Return True if any single- or multi-drug chemical field in `rec` hits held-out chemistry."""
+    if not forbid_smiles and not forbid_ik14 and not forbid_scaffolds:
+        return False
+    from ferroflux.data.dataset import canonicalize_smiles_and_keys
+
+    f_s = forbid_smiles or set()
+    f_ik = forbid_ik14 or set()
+    f_sc = forbid_scaffolds or set()
+    for k_s in ("canonical_smiles", "fin_modifier_smiles", "smiles_a", "smiles_b"):
+        sv = str(rec.get(k_s, "") or "").strip()
+        if not sv or sv.lower() == "nan":
+            continue
+        if sv in f_s:
+            return True
+        c_s, ik_s, sc_s = canonicalize_smiles_and_keys(sv)
+        if (c_s and c_s in f_s) or (ik_s and ik_s in f_ik) or (sc_s and sc_s in f_sc):
+            return True
+    for k_ik in ("ik14", "ik14_a", "ik14_b"):
+        iv = str(rec.get(k_ik, "") or "").strip()[:14]
+        if iv and iv.lower() != "nan" and iv in f_ik:
+            return True
+    for k_sc in ("murcko_scaffold", "murcko_scaffold_a", "murcko_scaffold_b"):
+        scv = str(rec.get(k_sc, "") or "").strip()
+        if scv and scv.lower() != "nan" and scv in f_sc:
+            return True
+    return False
+
+
+def _compute_standardized_extra_ctx_np(
+    idxr: Any,
+    cids: list[int] | np.ndarray,
+    ctx_mean: np.ndarray,
+    ctx_scale: np.ndarray,
+    ablate_physical_anchors: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build mask-aware standardized `[N, 234]` multi-omic context matching `FerroFluxFM.forward()`."""
+    n_c = len(cids)
+    if ablate_physical_anchors:
+        z = np.zeros((n_c, 234), dtype=np.float32)
+        return z, z.copy()
+    gen = idxr.cell_genomic[cids].astype(np.float32)
+    gen_m = (np.abs(gen).sum(axis=1, keepdims=True) > 1e-6).astype(np.float32) * np.ones_like(gen)
+    p64_m = idxr.cell_prot64_mask[cids].astype(np.float32)
+    p64 = idxr.cell_prot64[cids].astype(np.float32) * p64_m
+    l32_m = idxr.cell_lipid32_mask[cids].astype(np.float32)
+    l32 = idxr.cell_lipid32[cids].astype(np.float32) * l32_m
+    raw_ctx = np.concatenate([gen, p64, l32], axis=1)
+    ctx_m = np.concatenate([gen_m, p64_m, l32_m], axis=1)
+    sc = np.maximum(ctx_scale[None, :], 2e-2)
+    std_ctx = np.clip(((raw_ctx - ctx_mean[None, :]) / sc) * ctx_m, -6.0, 6.0).astype(np.float32)
+    return std_ctx, ctx_m.astype(np.float32)
+
+
 def calibrate_mgm_decoder_from_train_indices(
     model: FerroFluxFM,
     dataset: Any,
@@ -545,10 +621,11 @@ def calibrate_mgm_decoder_from_train_indices(
     device: torch.device,
     seed: int = 101,
 ) -> None:
-    """Calibrate library-mean-invariant `mgm_ctx_decoder` strictly on `train_indices` (`0` test or Stage-0 exposure)."""
+    """Calibrate affine-equivariant row-z-score `mgm_svd_proj` + `mgm_ctx_decoder` strictly on `train_indices` (`0` test or Stage-0 exposure)."""
     if forbid_test_set:
         assert forbid_test_set.isdisjoint(set(train_indices)), "FATAL: test index present in MGM calibration!"
     from ferroflux.data.dataset import get_fast_indexer
+    from sklearn.decomposition import TruncatedSVD
 
     idxr = get_fast_indexer(dataset)
     if idxr is None or not hasattr(dataset, "records") or model.n_genes < 128:
@@ -559,83 +636,82 @@ def calibrate_mgm_decoder_from_train_indices(
     recs = dataset.records
     tr_arr = np.asarray(train_indices, dtype=np.int64)
 
-    tr_cell_ids = np.unique(idxr.row_cell_idx[tr_arr])
-    valid_cids = [int(ci) for ci in tr_cell_ids if float(idxr.cell_mask[int(ci)].sum()) >= 64.0]
-    icb_norm_cids = list(
+    pmap = model._pathway_idx_map
+    sterol_req = pmap.get("sterol_7dhc_mask", pmap.get("sterol_up", []) + pmap.get("sterol_down", []))
+    basal_cids = sorted(
         {
             int(idxr.row_cell_idx[int(ti)])
-            for ti in tr_arr[: min(len(tr_arr), 250000)]
-            if recs[int(ti)].get("kind") in ("icb", "normal_sfti")
-            and float(idxr.cell_mask[int(idxr.row_cell_idx[int(ti)])].sum()) >= 64.0
+            for ti in tr_arr
+            if recs[int(ti)].get("kind") == "basal"
         }
     )
+    cand_cids = basal_cids if len(basal_cids) >= 64 else np.unique(idxr.row_cell_idx[tr_arr]).tolist()
+    valid_cids = [
+        int(ci)
+        for ci in cand_cids
+        if float(idxr.cell_mask[int(ci)].sum()) >= 256.0
+        and (not sterol_req or float(idxr.cell_mask[int(ci), sterol_req].min()) > 0.5)
+    ]
+    if len(valid_cids) < 24:
+        valid_cids = [int(ci) for ci in np.unique(idxr.row_cell_idx[tr_arr]) if float(idxr.cell_mask[int(ci)].sum()) >= 64.0]
     if len(valid_cids) < 24:
         return
 
-    mask_cids = valid_cids + icb_norm_cids * 8
-    if len(mask_cids) > 2600:
-        mask_cids = [mask_cids[int(j)] for j in rng.choice(len(mask_cids), size=2600, replace=False)]
+    xc_base = idxr.cell_expr[valid_cids].astype(np.float32)
+    mc_base = idxr.cell_mask[valid_cids].astype(np.float32)
+    n0 = len(xc_base)
+    xm_base = np.concatenate([xc_base, xc_base, xc_base], axis=0)
+    mm_base = np.concatenate([mc_base, mc_base, mc_base], axis=0)
 
-    xm_list = [idxr.cell_expr[mask_cids]]
-    mm_list = [idxr.cell_mask[mask_cids]]
-
-    pert_cand = [
-        int(ti)
-        for ti in tr_arr[: min(len(tr_arr), 250000)]
-        if recs[int(ti)].get("kind") == "perturb" and int(idxr.row_dx_idx[int(ti)]) > 0
-    ]
-    if pert_cand:
-        if len(pert_cand) > 1200:
-            pert_cand = [pert_cand[int(j)] for j in rng.choice(len(pert_cand), size=1200, replace=False)]
-        px_rows: list[np.ndarray] = []
-        pm_rows: list[np.ndarray] = []
-        for pi in pert_cand:
-            ci_p = int(idxr.row_cell_idx[pi])
-            di_p = int(idxr.row_dx_idx[pi])
-            if float(idxr.cell_mask[ci_p].sum()) >= 256.0 and float(idxr.dx_mask_table[di_p].sum()) >= 256.0:
-                px_rows.append(np.clip(idxr.cell_expr[ci_p] + idxr.dx_target_table[di_p], 0.0, 20.0))
-                pm_rows.append(idxr.cell_mask[ci_p])
-        if px_rows:
-            xm_list.append(np.stack(px_rows, axis=0))
-            mm_list.append(np.stack(pm_rows, axis=0))
-
-    xm_base = np.concatenate(xm_list, axis=0)
-    mm_base = np.concatenate(mm_list, axis=0)
-
-    pmap = model._pathway_idx_map
-    block_sets = [
-        sorted(set(pmap.get("cgas_sting", []) + pmap.get("pdl1_ifn", []))),
-        sorted(set(pmap.get("tlr_ferro", []))),
-        sorted(set(pmap.get("sterol_7dhc_mask", pmap.get("sterol_up", []) + pmap.get("sterol_down", [])))),
-    ]
+    sting_idx = sorted(set(pmap.get("cgas_sting", []) + pmap.get("pdl1_ifn", [])))
+    sterol_idx = sorted(set(sterol_req))
     km_mat = np.ones_like(mm_base)
-    for r_i in range(len(xm_base)):
-        mode_r = r_i % 4
-        if mode_r < 3 and block_sets[mode_r]:
-            km_mat[r_i, block_sets[mode_r]] = 0.0
-        rand_drop = rng.random(n_genes) < 0.15
-        km_mat[r_i, rand_drop] = 0.0
+    if sting_idx:
+        km_mat[:n0, sting_idx] = 0.0
+    if sterol_idx:
+        km_mat[n0 : 2 * n0, sterol_idx] = 0.0
+    km_mat *= (rng.random(km_mat.shape) >= 0.15).astype(np.float32)
+
     eff_m = mm_base * km_mat
     eff_cnt = np.maximum(eff_m.sum(axis=1, keepdims=True), 1.0)
     xm_obs_mean = (xm_base * eff_m).sum(axis=1, keepdims=True) / eff_cnt
-    xm_cent = (xm_base - xm_obs_mean) * eff_m
+    xm_obs_var = (((xm_base - xm_obs_mean) * eff_m) ** 2).sum(axis=1, keepdims=True) / eff_cnt
+    xm_obs_std = np.sqrt(xm_obs_var + 1e-4)
+    xz_obs = (((xm_base - xm_obs_mean) / xm_obs_std) * eff_m).astype(np.float32)
+    yz_full = ((xm_base - xm_obs_mean) / xm_obs_std).astype(np.float32)
+
+    k_svd = min(256, xz_obs.shape[0] - 1, n_genes - 1)
+    if k_svd < 16:
+        return
+    svd_m = TruncatedSVD(n_components=k_svd, random_state=seed + 5)
+    z_svd = svd_m.fit_transform(xz_obs)
+    col_sc = np.maximum(np.std(z_svd, axis=0, keepdims=True), 1e-2).T
+    w_svd = (svd_m.components_ / col_sc).astype(np.float32)
 
     was_training = model.training
     model.eval()
     with torch.no_grad():
-        z_ctx_chunks: list[np.ndarray] = []
-        trunk_rec_chunks: list[np.ndarray] = []
+        model.mgm_svd_proj.weight.zero_()
+        model.mgm_svd_proj.weight[:k_svd].copy_(torch.from_numpy(w_svd).to(device=device))
+
+        mgm_lat_chunks: list[np.ndarray] = []
+        trunk_rel_chunks: list[np.ndarray] = []
         for s_i in range(0, len(xm_base), 256):
-            xb_t = torch.from_numpy(xm_base[s_i : s_i + 256]).to(device=device)
-            mb_t = torch.from_numpy(mm_base[s_i : s_i + 256]).to(device=device)
-            kb_t = torch.from_numpy(km_mat[s_i : s_i + 256]).to(device=device)
-            xc_t = torch.from_numpy(xm_cent[s_i : s_i + 256]).to(device=device)
-            z_ctx_chunks.append(model.expr_ctx_proj(xc_t).cpu().numpy())
+            sl_r = slice(s_i, min(len(xm_base), s_i + 256))
+            xb_t = torch.from_numpy(xm_base[sl_r]).to(device=device)
+            mb_t = torch.from_numpy(mm_base[sl_r]).to(device=device)
+            kb_t = torch.from_numpy(km_mat[sl_r]).to(device=device)
+            xz_t = torch.from_numpy(xz_obs[sl_r]).to(device=device)
             t_out = model.perceiver_trunk(xb_t, expr_mask=mb_t, mgm_keep_mask=kb_t)
-            trunk_rec_chunks.append(t_out["mgm_recon"].cpu().numpy())
-        z_ctx_all = np.concatenate(z_ctx_chunks, axis=0)
-        y_res_full = xm_base - np.concatenate(trunk_rec_chunks, axis=0)
-        w_mgm, b_mgm = _solve_ridge_np(z_ctx_all, y_res_full, lam=45.0)
+            tr_al = t_out["mgm_recon"]
+            tr_rel = (tr_al - tr_al.mean(dim=-1, keepdim=True)) / (tr_al.std(dim=-1, keepdim=True) + 1.0)
+            mgm_lat_chunks.append(model.mgm_svd_proj(xz_t).cpu().numpy())
+            trunk_rel_chunks.append(tr_rel.cpu().numpy())
+
+        mgm_lat_all = np.concatenate(mgm_lat_chunks, axis=0)
+        trunk_rel_all = np.concatenate(trunk_rel_chunks, axis=0)
+        y_res_z = yz_full - 0.01 * trunk_rel_all
+        w_mgm, b_mgm = _solve_ridge_np(mgm_lat_all, y_res_z, lam=180.0)
         model.mgm_ctx_decoder.weight.zero_()
         model.mgm_ctx_decoder.weight[:, model.d_model :].copy_(torch.from_numpy(w_mgm).to(device=device))
         model.mgm_ctx_decoder.bias.copy_(torch.from_numpy(b_mgm).to(device=device))
@@ -649,6 +725,9 @@ def warmstart_from_train_indices(
     train_indices: list[int],
     *,
     forbid_test_set: set[int] | None = None,
+    forbid_smiles: set[str] | None = None,
+    forbid_ik14: set[str] | None = None,
+    forbid_scaffolds: set[str] | None = None,
     device: torch.device,
     seed: int = 101,
 ) -> None:
@@ -656,6 +735,7 @@ def warmstart_from_train_indices(
     if forbid_test_set:
         assert forbid_test_set.isdisjoint(set(train_indices)), "FATAL: test index present in warm-start train_indices!"
     from ferroflux.data.dataset import get_fast_indexer
+    from ferroflux.layers.perceiver_trunk import METABOLITE_TO_IDX
     from sklearn.decomposition import TruncatedSVD
 
     idxr = get_fast_indexer(dataset)
@@ -667,7 +747,7 @@ def warmstart_from_train_indices(
     recs = dataset.records
     tr_arr = np.asarray(train_indices, dtype=np.int64)
 
-    # 1. Cell-expression standardization stats & Spectral basis for `expr_ctx_proj[0]` strictly from `train_indices`
+    # 1. Row-standardized transcriptome spectral basis (`expr_ctx_proj[0]`) & `anchor_mrna_ref` strictly from `train_indices`
     tr_cell_ids = np.unique(idxr.row_cell_idx[tr_arr])
     valid_cids = [int(ci) for ci in tr_cell_ids if float(idxr.cell_mask[int(ci)].sum()) > 0.0]
     icb_norm_cids = list(
@@ -678,18 +758,100 @@ def warmstart_from_train_indices(
             and float(idxr.cell_mask[int(idxr.row_cell_idx[int(ti)])].sum()) > 0.0
         }
     )
+    if len(valid_cids) >= 24:
+        xv_raw = idxr.cell_expr[valid_cids]
+        mv_raw = idxr.cell_mask[valid_cids]
+        cnt_v = np.maximum(mv_raw.sum(axis=1, keepdims=True), 1.0)
+        xm_v = (xv_raw * mv_raw).sum(axis=1, keepdims=True) / cnt_v
+        xvar_v = (((xv_raw - xm_v) * mv_raw) ** 2).sum(axis=1, keepdims=True) / cnt_v
+        xrel_v = (((xv_raw - xm_v) / np.sqrt(xvar_v + 0.25)) * mv_raw).astype(np.float32)
+
+        anc_idx_np = model.perceiver_trunk.anchor_gene_idx.detach().cpu().numpy()
+        anc_m_v = mv_raw[:, anc_idx_np]
+        anc_cnt = np.maximum(anc_m_v.sum(axis=0), 1.0)
+        anc_ref = ((xrel_v[:, anc_idx_np] * anc_m_v).sum(axis=0) / anc_cnt).astype(np.float32)
+        anc_basal = np.clip(0.55 * ((xv_raw[:, anc_idx_np] * anc_m_v).sum(axis=0) / anc_cnt), 0.15, 6.5).astype(np.float32)
+        with torch.no_grad():
+            model.perceiver_trunk.anchor_mrna_ref.copy_(torch.from_numpy(anc_ref).to(device=device))
+            model.perceiver_trunk.anchor_mrna_log_basal.copy_(torch.from_numpy(anc_basal).to(device=device))
+
+        if not model.ablate_physical_anchors:
+            gen_v = idxr.cell_genomic[valid_cids].astype(np.float32)
+            gen_mv = (np.abs(gen_v).sum(axis=1, keepdims=True) > 1e-6).astype(np.float32) * np.ones_like(gen_v)
+            p64_mv = idxr.cell_prot64_mask[valid_cids].astype(np.float32)
+            l32_mv = idxr.cell_lipid32_mask[valid_cids].astype(np.float32)
+            raw_ctx_v = np.concatenate(
+                [gen_v, idxr.cell_prot64[valid_cids] * p64_mv, idxr.cell_lipid32[valid_cids] * l32_mv], axis=1
+            )
+            ctx_mv = np.concatenate([gen_mv, p64_mv, l32_mv], axis=1)
+            cnt_ctx = np.maximum(ctx_mv.sum(axis=0), 1.0)
+            mu_ctx = ((raw_ctx_v * ctx_mv).sum(axis=0) / cnt_ctx).astype(np.float32)
+            var_ctx = ((((raw_ctx_v - mu_ctx[None, :]) * ctx_mv) ** 2).sum(axis=0) / cnt_ctx).astype(np.float32)
+            sd_ctx = np.where(np.sqrt(var_ctx) < 2e-2, 1.0, np.sqrt(var_ctx)).astype(np.float32)
+            with torch.no_grad():
+                model.ctx_obs_mean.copy_(torch.from_numpy(mu_ctx).to(device=device))
+                model.ctx_obs_scale.copy_(torch.from_numpy(sd_ctx).to(device=device))
+
+            pl_std_v = np.clip(
+                ((raw_ctx_v[:, 138:] - mu_ctx[None, 138:]) / np.maximum(sd_ctx[None, 138:], 2e-2)) * ctx_mv[:, 138:],
+                -6.0,
+                6.0,
+            ).astype(np.float32)
+            model.eval()
+            with torch.no_grad():
+                plog_mrna_chunks: list[np.ndarray] = []
+                mlog_mrna_chunks: list[np.ndarray] = []
+                for s_i in range(0, len(valid_cids), 256):
+                    sl_c = valid_cids[s_i : s_i + 256]
+                    xb_t = torch.from_numpy(idxr.cell_expr[sl_c]).to(device=device)
+                    mb_t = torch.from_numpy(idxr.cell_mask[sl_c]).to(device=device)
+                    epi_t = torch.from_numpy(
+                        idxr.cell_cis_reg[sl_c] * idxr.cell_cis_mask[sl_c][..., None]
+                    ).to(device=device, dtype=xb_t.dtype)
+                    cis_tok = model.cis_reg_slot(epi_t, batch_size=len(sl_c), device=device, dtype=xb_t.dtype)
+                    tr_o = model.perceiver_trunk(xb_t, expr_mask=mb_t, cis_reg_tokens=cis_tok)
+                    plog_mrna_chunks.append(tr_o["p_hat_log"].cpu().numpy())
+                    mlog_mrna_chunks.append(tr_o["m0_hat_log"].cpu().numpy())
+                plog_mrna_v = np.concatenate(plog_mrna_chunks, axis=0)
+                mlog_mrna_v = np.concatenate(mlog_mrna_chunks, axis=0)
+
+                prot_res_y = idxr.cell_prot_target[valid_cids] - plog_mrna_v
+                prot_m_v = idxr.cell_prot_mask[valid_cids]
+                w_prot = _solve_zero_bias_ridge_np(pl_std_v, prot_res_y, mask=prot_m_v, lam=140.0)
+                model.multiomic_to_prot_anchor.weight.copy_(torch.from_numpy(w_prot).to(device=device))
+
+                met_keys_9 = (
+                    "GSH",
+                    "GSSG",
+                    "NADP+",
+                    "putrescine",
+                    "spermidine",
+                    "PC_PUFA2",
+                    "PE_PUFA",
+                    "ePL_PUFA",
+                    "MUFA_PL",
+                )
+                met_idx_9 = [METABOLITE_TO_IDX[mk] for mk in met_keys_9]
+                met_res_y = idxr.cell_metab_target[valid_cids, :9] - mlog_mrna_v[:, met_idx_9]
+                met_m_v = idxr.cell_metab_mask[valid_cids, :9]
+                w_met9 = _solve_zero_bias_ridge_np(pl_std_v, met_res_y, mask=met_m_v, lam=140.0)
+                model.multiomic_to_metab_anchor.weight.zero_()
+                for j_loc, m_col in enumerate(met_idx_9):
+                    model.multiomic_to_metab_anchor.weight[m_col].copy_(torch.from_numpy(w_met9[j_loc]).to(device=device))
+
     if len(valid_cids) >= 32 and n_genes >= 128:
         aug_cids = valid_cids + icb_norm_cids * 6
         x_raw = idxr.cell_expr[aug_cids]
         m_raw = idxr.cell_mask[aug_cids]
         cnt_m = np.maximum(m_raw.sum(axis=1, keepdims=True), 1.0)
         x_mean = (x_raw * m_raw).sum(axis=1, keepdims=True) / cnt_m
-        x_cent = (x_raw - x_mean) * m_raw
+        x_var = (((x_raw - x_mean) * m_raw) ** 2).sum(axis=1, keepdims=True) / cnt_m
+        x_rel = (((x_raw - x_mean) / np.sqrt(x_var + 0.25)) * m_raw).astype(np.float32)
 
-        k_expr = min(128, x_cent.shape[0] - 1, n_genes - 1)
+        k_expr = min(128, x_rel.shape[0] - 1, n_genes - 1)
         if k_expr >= 16:
             svd_x = TruncatedSVD(n_components=k_expr, random_state=seed)
-            z_svd = svd_x.fit_transform(x_cent)
+            z_svd = svd_x.fit_transform(x_rel)
             col_scale = np.maximum(np.std(z_svd, axis=0, keepdims=True), 1e-2).T  # (k_expr, 1)
             w_proj = (svd_x.components_ / col_scale).astype(np.float32)
             with torch.no_grad():
@@ -698,44 +860,60 @@ def warmstart_from_train_indices(
                 lin0.bias.zero_()
                 lin0.weight[:k_expr].copy_(torch.from_numpy(w_proj).to(device=device))
 
-    # 2. Fit full multi-omic cell standardization stats (`full_cell_dim`) strictly on `train_indices`
+    # 2. Fit observed-only multi-omic cell standardization stats (`full_cell_dim`) strictly on `train_indices`
     if len(valid_cids) >= 24:
+        ctx_m_np = model.ctx_obs_mean.detach().cpu().numpy()
+        ctx_s_np = model.ctx_obs_scale.detach().cpu().numpy()
+        ex_v_np, ex_m_v_np = _compute_standardized_extra_ctx_np(
+            idxr, valid_cids, ctx_m_np, ctx_s_np, model.ablate_physical_anchors
+        )
         model.eval()
         with torch.no_grad():
             fc_chunks: list[np.ndarray] = []
+            fm_chunks: list[np.ndarray] = []
             for s_i in range(0, len(valid_cids), 256):
                 sl_c = valid_cids[s_i : s_i + 256]
-                xb_np = idxr.cell_expr[sl_c] * idxr.cell_mask[sl_c]
+                xb_t = torch.from_numpy(idxr.cell_expr[sl_c]).to(device=device, dtype=torch.float32)
+                mb_t = torch.from_numpy(idxr.cell_mask[sl_c]).to(device=device, dtype=torch.float32)
+                ex_t = torch.from_numpy(ex_v_np[s_i : s_i + 256]).to(device=device, dtype=torch.float32)
+                ex_m_t = torch.from_numpy(ex_m_v_np[s_i : s_i + 256]).to(device=device, dtype=torch.float32)
                 if model.ablate_physical_anchors:
-                    pl_np = np.zeros((len(sl_c), 28), dtype=np.float32)
-                    ml_np = np.zeros((len(sl_c), 12), dtype=np.float32)
-                    ex_np = np.zeros((len(sl_c), 234), dtype=np.float32)
+                    pl_t = torch.zeros((len(sl_c), 28), device=device, dtype=torch.float32)
+                    ml_t = torch.zeros((len(sl_c), 12), device=device, dtype=torch.float32)
+                    ph_t = torch.ones((len(sl_c), 28), device=device, dtype=torch.float32)
                 else:
-                    xb_t = torch.from_numpy(idxr.cell_expr[sl_c]).to(device=device)
-                    mb_t = torch.from_numpy(idxr.cell_mask[sl_c]).to(device=device)
-                    epi_t = torch.from_numpy(idxr.cell_cis_reg[sl_c] * idxr.cell_cis_mask[sl_c][..., None]).to(device=device)
+                    epi_t = torch.from_numpy(
+                        idxr.cell_cis_reg[sl_c] * idxr.cell_cis_mask[sl_c][..., None]
+                    ).to(device=device, dtype=torch.float32)
                     cis_tok = model.cis_reg_slot(epi_t, batch_size=len(sl_c), device=device, dtype=xb_t.dtype)
                     tr_o = model.perceiver_trunk(xb_t, expr_mask=mb_t, cis_reg_tokens=cis_tok)
-                    pl_np = tr_o["p_hat_log"].cpu().numpy()
-                    ml_np = tr_o["m0_hat_log"].cpu().numpy()
-                    ex_np = np.concatenate(
-                        [
-                            idxr.cell_genomic[sl_c],
-                            idxr.cell_prot64[sl_c] * idxr.cell_prot64_mask[sl_c],
-                            idxr.cell_lipid32[sl_c] * idxr.cell_lipid32_mask[sl_c],
-                        ],
-                        axis=1,
-                    )
+                    pl_ctx_t = ex_t[:, 138:]
+                    pl_t = tr_o["p_hat_log"] + model.multiomic_to_prot_anchor(pl_ctx_t)
+                    ml_t = tr_o["m0_hat_log"] + model.multiomic_to_metab_anchor(pl_ctx_t)
+                    ph_t = F.softplus(pl_t + model.perceiver_trunk.anchor_mrna_log_basal.unsqueeze(0)) + 0.05
                 if model.ablate_cis_reg:
-                    cis_np = np.zeros((len(sl_c), 64), dtype=np.float32)
+                    ci_t = torch.zeros((len(sl_c), 64), device=device, dtype=torch.float32)
+                    ci_m_t = torch.zeros((len(sl_c), 64), device=device, dtype=torch.float32)
                 else:
-                    ep_raw = idxr.cell_cis_reg[sl_c] * idxr.cell_cis_mask[sl_c][..., None]
-                    cis_np = (0.5 * ep_raw[:, :64, 0] + 0.5 * ep_raw[:, :64, 2]).astype(np.float32)
-                fc_chunks.append(np.concatenate([xb_np, pl_np, ml_np, ex_np, cis_np], axis=1))
+                    ep_r = idxr.cell_cis_reg[sl_c] * idxr.cell_cis_mask[sl_c][..., None]
+                    ci_np = (0.35 * ep_r[:, :64, 0] + 0.35 * ep_r[:, :64, 2] + 0.30 * ep_r[:, :64, 1:].mean(axis=-1)).astype(
+                        np.float32
+                    )
+                    ci_t = torch.from_numpy(ci_np).to(device=device)
+                    ci_m_t = torch.from_numpy(idxr.cell_cis_mask[sl_c, :64].astype(np.float32)).to(device=device)
+                sec_b_t = model.compute_basal_sec46_features(xb_t, mb_t, ph_t, ml_t)
+                fc_t, fm_t = model.diff_ferro_gem.build_raw_cell_greybox_features(
+                    xb_t, mb_t, pl_t, ml_t, ex_t, ci_t, ctx_mask=ex_m_t, cis_mask=ci_m_t, sec_basal_3=sec_b_t
+                )
+                fc_chunks.append(fc_t.cpu().numpy())
+                fm_chunks.append(fm_t.cpu().numpy())
             fc_mat = np.concatenate(fc_chunks, axis=0)
+            fm_mat = np.concatenate(fm_chunks, axis=0)
             if fc_mat.shape[1] == model.diff_ferro_gem.cell_expr_mean.numel():
-                fc_mean = np.mean(fc_mat, axis=0).astype(np.float32)
-                fc_std = np.std(fc_mat, axis=0).astype(np.float32)
+                cnt_fc = np.maximum(fm_mat.sum(axis=0), 1.0)
+                fc_mean = ((fc_mat * fm_mat).sum(axis=0) / cnt_fc).astype(np.float32)
+                fc_var = ((((fc_mat - fc_mean[None, :]) * fm_mat) ** 2).sum(axis=0) / cnt_fc).astype(np.float32)
+                fc_std = np.sqrt(fc_var)
                 fc_scale = np.where(fc_std < 2e-2, 1.0, fc_std).astype(np.float32)
                 model.diff_ferro_gem.cell_expr_mean.copy_(torch.from_numpy(fc_mean).to(device=device))
                 model.diff_ferro_gem.cell_expr_scale.copy_(torch.from_numpy(fc_scale).to(device=device))
@@ -744,7 +922,9 @@ def warmstart_from_train_indices(
     tr_pharm_list = [
         int(ti)
         for ti in tr_arr
-        if recs[int(ti)].get("kind") == "pharmaco" and int(idxr.row_chem_a_idx[int(ti)]) > 0
+        if recs[int(ti)].get("kind") == "pharmaco"
+        and int(idxr.row_chem_a_idx[int(ti)]) > 0
+        and not _record_hits_forbidden_chemistry(recs[int(ti)], forbid_smiles, forbid_ik14, forbid_scaffolds)
     ]
     if len(tr_pharm_list) >= 32:
         tr_ph_arr = np.asarray(tr_pharm_list, dtype=np.int64)
@@ -783,7 +963,7 @@ def warmstart_from_train_indices(
             model.perturbation_op.chem_dense_mean.copy_(torch.from_numpy(c_mean).to(device=device))
             model.perturbation_op.chem_dense_scale.copy_(torch.from_numpy(c_scale).to(device=device))
 
-    # 4. Masked pathway-block Ridge warm-start for `mgm_ctx_decoder`
+    # 4. Masked pathway-block Ridge warm-start for `mgm_svd_proj` + `mgm_ctx_decoder`
     calibrate_mgm_decoder_from_train_indices(
         model,
         dataset,
@@ -810,16 +990,21 @@ def fit_post_curriculum_greybox_from_train_indices(
     train_indices: list[int],
     *,
     forbid_test_set: set[int] | None = None,
-    split_name: str = "",
+    forbid_smiles: set[str] | None = None,
+    forbid_ik14: set[str] | None = None,
+    forbid_scaffolds: set[str] | None = None,
+    include_non_ferro: bool = False,
+    split_name: str = "",  # noqa: ARG001 — unused; blend is 100% inner-CV + train-Tanimoto driven!
     device: torch.device,
     seed: int = 101,
 ) -> None:
-    """Post-Stage-5 APHYNITY Grey-Box Scaffold-Generalizing Residual Fit STRICTLY on `train_indices` (`0` test exposure)."""
+    """Post-Stage-5 APHYNITY Grey-Box Residual Fit STRICTLY on `train_indices` (`0` test exposure, `0` split-name oracle)."""
     if forbid_test_set:
         assert forbid_test_set.isdisjoint(set(train_indices)), "FATAL: test index present in post-curriculum greybox!"
     if model.ablate_diff_ferro_gem or model.ablate_aphynity_residual:
         return
     from ferroflux.data.dataset import get_fast_indexer
+    from scipy.stats import spearmanr
 
     idxr = get_fast_indexer(dataset)
     if idxr is None or not hasattr(dataset, "records"):
@@ -828,32 +1013,33 @@ def fit_post_curriculum_greybox_from_train_indices(
     rng = np.random.default_rng(seed + 91)
     recs = dataset.records
     tr_arr = np.asarray(train_indices, dtype=np.int64)
-    ferro_ph = [
-        int(ti)
-        for ti in tr_arr
-        if recs[int(ti)].get("kind") == "pharmaco"
-        and int(idxr.row_chem_a_idx[int(ti)]) > 0
-        and float(idxr.viability_mask[int(ti)]) > 0.5
-        and int(recs[int(ti)].get("is_ferroptosis_compound", 1)) > 0
-    ]
-    other_ph = [
-        int(ti)
-        for ti in tr_arr
-        if recs[int(ti)].get("kind") == "pharmaco"
-        and int(idxr.row_chem_a_idx[int(ti)]) > 0
-        and float(idxr.viability_mask[int(ti)]) > 0.5
-        and int(recs[int(ti)].get("is_ferroptosis_compound", 1)) == 0
-    ]
+    ferro_ph: list[int] = []
+    other_ph: list[int] = []
+    for ti in tr_arr:
+        ti_int = int(ti)
+        rc = recs[ti_int]
+        if (
+            rc.get("kind") != "pharmaco"
+            or int(idxr.row_chem_a_idx[ti_int]) <= 0
+            or float(idxr.viability_mask[ti_int]) <= 0.5
+            or _record_hits_forbidden_chemistry(rc, forbid_smiles, forbid_ik14, forbid_scaffolds)
+        ):
+            continue
+        if int(rc.get("is_ferroptosis_compound", 1)) > 0:
+            ferro_ph.append(ti_int)
+        else:
+            other_ph.append(ti_int)
+
     if len(ferro_ph) < 128 or model.diff_ferro_gem.cell_expr_mean.numel() != model.diff_ferro_gem.full_cell_dim:
         return
 
     f_sub = np.asarray(ferro_ph, dtype=np.int64)
     if len(f_sub) > 50000:
         f_sub = np.sort(f_sub[rng.choice(len(f_sub), size=50000, replace=False)])
-    if split_name == "5_cuproptosis_elesclomol_specificity" and len(other_ph) >= 64:
+    if include_non_ferro and len(other_ph) >= 32:
         o_arr = np.asarray(other_ph, dtype=np.int64)
-        if len(o_arr) > 12000:
-            o_arr = np.sort(o_arr[rng.choice(len(o_arr), size=12000, replace=False)])
+        if len(o_arr) > 10000:
+            o_arr = np.sort(o_arr[rng.choice(len(o_arr), size=10000, replace=False)])
         tr_f_arr = np.concatenate([f_sub, o_arr], axis=0)
     else:
         tr_f_arr = f_sub
@@ -861,50 +1047,85 @@ def fit_post_curriculum_greybox_from_train_indices(
     if forbid_test_set:
         assert forbid_test_set.isdisjoint(set(tr_f_arr.tolist())), "FATAL: test leak in greybox calibration!"
 
+    # Deterministically re-initialize post-curriculum grey-box modules (`gb_mods`) so Stage 1-5 decoupled
+    # weight decay / in-split scaffold memorization never distorts `hf_wb_f` or collapses starting weights.
+    rng_state_cpu = torch.random.get_rng_state()
+    try:
+        torch.manual_seed(int(seed) + 701)
+        for mod_init in (
+            model.perturbation_op.chem_scaffold_inv_enc,
+            model.perturbation_op.chem_shared_ecfp_enc,
+            model.perturbation_op.chem_scaffold_fuse,
+            model.diff_ferro_gem.aphynity_scaf_cell_net,
+            model.diff_ferro_gem.aphynity_scaf_head,
+            model.diff_ferro_gem.aphynity_scaf_ferro_gate,
+        ):
+            for sub_m in mod_init.modules():
+                if hasattr(sub_m, "reset_parameters"):
+                    sub_m.reset_parameters()
+        with torch.no_grad():
+            model.diff_ferro_gem.aphynity_scaf_head[-1].weight.zero_()
+            model.diff_ferro_gem.aphynity_scaf_head[-1].bias.zero_()
+            model.diff_ferro_gem.aphynity_scaf_ferro_gate.weight.zero_()
+            model.diff_ferro_gem.aphynity_scaf_ferro_gate.bias.fill_(4.0)
+    finally:
+        torch.random.set_rng_state(rng_state_cpu)
+
+    ctx_m_np = model.ctx_obs_mean.detach().cpu().numpy()
+    ctx_s_np = model.ctx_obs_scale.detach().cpu().numpy()
+
     model.eval()
     with torch.no_grad():
         model.diff_ferro_gem.scaf_gb_ready.zero_()
         u_cells, cell_inv_f = np.unique(idxr.row_cell_idx[tr_f_arr], return_inverse=True)
+        ex_u_np, ex_m_u_np = _compute_standardized_extra_ctx_np(
+            idxr, u_cells, ctx_m_np, ctx_s_np, model.ablate_physical_anchors
+        )
         raw_fc_chunks: list[np.ndarray] = []
         fmask_chunks: list[np.ndarray] = []
         for s_i in range(0, len(u_cells), 256):
             sl_c = u_cells[s_i : s_i + 256]
             gm_t = torch.from_numpy(idxr.cell_mask[sl_c]).to(device=device, dtype=torch.float32)
             xb_t = torch.from_numpy(idxr.cell_expr[sl_c]).to(device=device, dtype=torch.float32)
+            ex_t = torch.from_numpy(ex_u_np[s_i : s_i + 256]).to(device=device, dtype=torch.float32)
+            ex_m_t = torch.from_numpy(ex_m_u_np[s_i : s_i + 256]).to(device=device, dtype=torch.float32)
             if model.ablate_physical_anchors:
                 pl_t = torch.zeros((len(sl_c), 28), device=device, dtype=torch.float32)
                 ml_t = torch.zeros((len(sl_c), 12), device=device, dtype=torch.float32)
-                ex_t = torch.zeros((len(sl_c), 234), device=device, dtype=torch.float32)
+                ph_t = torch.ones((len(sl_c), 28), device=device, dtype=torch.float32)
             else:
                 epi_t = torch.from_numpy(idxr.cell_cis_reg[sl_c] * idxr.cell_cis_mask[sl_c][..., None]).to(
                     device=device, dtype=torch.float32
                 )
                 cis_tok = model.cis_reg_slot(epi_t, batch_size=len(sl_c), device=device, dtype=xb_t.dtype)
                 tr_o = model.perceiver_trunk(xb_t, expr_mask=gm_t, cis_reg_tokens=cis_tok)
-                pl_t = tr_o["p_hat_log"]
-                ml_t = tr_o["m0_hat_log"]
-                ex_np = np.concatenate(
-                    [
-                        idxr.cell_genomic[sl_c],
-                        idxr.cell_prot64[sl_c] * idxr.cell_prot64_mask[sl_c],
-                        idxr.cell_lipid32[sl_c] * idxr.cell_lipid32_mask[sl_c],
-                    ],
-                    axis=1,
-                )
-                ex_t = torch.from_numpy(ex_np).to(device=device, dtype=torch.float32)
+                pl_ctx_t = ex_t[:, 138:]
+                pl_t = tr_o["p_hat_log"] + model.multiomic_to_prot_anchor(pl_ctx_t)
+                ml_t = tr_o["m0_hat_log"] + model.multiomic_to_metab_anchor(pl_ctx_t)
+                ph_t = F.softplus(pl_t + model.perceiver_trunk.anchor_mrna_log_basal.unsqueeze(0)) + 0.05
             if model.ablate_cis_reg:
                 ci_t = torch.zeros((len(sl_c), 64), device=device, dtype=torch.float32)
+                ci_m_t = torch.zeros((len(sl_c), 64), device=device, dtype=torch.float32)
             else:
                 ep_r = idxr.cell_cis_reg[sl_c] * idxr.cell_cis_mask[sl_c][..., None]
-                ci_t = torch.from_numpy((0.5 * ep_r[:, :64, 0] + 0.5 * ep_r[:, :64, 2]).astype(np.float32)).to(device=device)
-            fc_t, fm_t = model.diff_ferro_gem.build_raw_cell_greybox_features(xb_t, gm_t, pl_t, ml_t, ex_t, ci_t)
+                ci_np = (0.35 * ep_r[:, :64, 0] + 0.35 * ep_r[:, :64, 2] + 0.30 * ep_r[:, :64, 1:].mean(axis=-1)).astype(
+                    np.float32
+                )
+                ci_t = torch.from_numpy(ci_np).to(device=device)
+                ci_m_t = torch.from_numpy(idxr.cell_cis_mask[sl_c, :64].astype(np.float32)).to(device=device)
+            sec_b_t = model.compute_basal_sec46_features(xb_t, gm_t, ph_t, ml_t)
+            fc_t, fm_t = model.diff_ferro_gem.build_raw_cell_greybox_features(
+                xb_t, gm_t, pl_t, ml_t, ex_t, ci_t, ctx_mask=ex_m_t, cis_mask=ci_m_t, sec_basal_3=sec_b_t
+            )
             raw_fc_chunks.append(fc_t.cpu().numpy())
             fmask_chunks.append(fm_t.cpu().numpy())
 
         raw_fc_u = np.concatenate(raw_fc_chunks, axis=0)
         fmask_u = np.concatenate(fmask_chunks, axis=0)
-        cm_new = raw_fc_u.mean(axis=0).astype(np.float32)
-        cs_std = raw_fc_u.std(axis=0).astype(np.float32)
+        cnt_fmask = np.maximum(fmask_u.sum(axis=0), 1.0)
+        cm_new = ((raw_fc_u * fmask_u).sum(axis=0) / cnt_fmask).astype(np.float32)
+        cs_var = ((((raw_fc_u - cm_new[None, :]) * fmask_u) ** 2).sum(axis=0) / cnt_fmask).astype(np.float32)
+        cs_std = np.sqrt(cs_var)
         cs_new = np.where(cs_std < 2e-2, 1.0, cs_std).astype(np.float32)
         model.diff_ferro_gem.cell_expr_mean.copy_(torch.from_numpy(cm_new).to(device=device))
         model.diff_ferro_gem.cell_expr_scale.copy_(torch.from_numpy(cs_new).to(device=device))
@@ -918,17 +1139,28 @@ def fit_post_curriculum_greybox_from_train_indices(
             .astype(np.float32)
         )
 
-        u_chems = np.unique(idxr.row_chem_a_idx[tr_f_arr])
-        if len(u_chems) >= 6:
-            chem_ecfp_u = (idxr.chem_fp_table[u_chems, : model.perturbation_op.ecfp_sub_dim] > 0.5).astype(np.float32)
+        is_ferro_f = idxr.is_ferroptosis_compound[tr_f_arr].astype(np.float32)
+        ca_f = idxr.row_chem_a_idx[tr_f_arr]
+        ferro_ca = np.unique(ca_f[is_ferro_f > 0.5])
+        all_tr_ca = np.unique(ca_f)
+        if len(all_tr_ca) >= 1:
+            n_bk = min(len(all_tr_ca), model.perturbation_op.max_train_chem_bank)
+            bk_fp = (idxr.chem_fp_table[all_tr_ca[:n_bk], :2048] > 0.5).astype(np.float32)
+            model.perturbation_op.train_chem_ecfp_bank.zero_()
+            model.perturbation_op.train_chem_ecfp_bank[:n_bk].copy_(torch.from_numpy(bk_fp).to(device=device))
+            model.perturbation_op.n_train_chem_bank.fill_(int(n_bk))
+        if len(ferro_ca) >= 4:
+            chem_ecfp_u = (idxr.chem_fp_table[ferro_ca, : model.perturbation_op.ecfp_sub_dim] > 0.5).astype(np.float32)
             bit_cnt = chem_ecfp_u.sum(axis=0)
-            sh_mask = ((bit_cnt >= 1.0) & (bit_cnt <= max(4.0, 0.90 * float(len(u_chems))))).astype(np.float32)
+            sh_mask = ((bit_cnt >= 1.0) & (bit_cnt <= max(4.0, 0.90 * float(len(ferro_ca))))).astype(np.float32)
             if float(sh_mask.sum()) >= 16.0:
                 model.perturbation_op.shared_ecfp_mask.copy_(torch.from_numpy(sh_mask).to(device=device))
-        ca_f = idxr.row_chem_a_idx[tr_f_arr]
+
         _, ca_inv, ca_cnts = np.unique(ca_f, return_inverse=True, return_counts=True)
         cmpd_w_raw = 1.0 / np.sqrt(np.maximum(ca_cnts[ca_inv].astype(np.float32), 16.0))
-        cmpd_w_f = (cmpd_w_raw / max(1e-6, float(cmpd_w_raw.mean()))).astype(np.float32)
+        ferro_w_mean = float(cmpd_w_raw[is_ferro_f > 0.5].mean()) if np.any(is_ferro_f > 0.5) else float(cmpd_w_raw.mean())
+        cmpd_w_f = (cmpd_w_raw / max(1e-6, ferro_w_mean)).astype(np.float32)
+
         dlog_f = idxr.dose_a[tr_f_arr].astype(np.float32)
         duM_f = np.maximum(np.power(10.0, np.clip(dlog_f, -4.0, 3.5)) - 1e-3, 0.0).astype(np.float32)
         raw_cd_chunks: list[np.ndarray] = []
@@ -949,8 +1181,9 @@ def fit_post_curriculum_greybox_from_train_indices(
             ecfp_sh_chunks.append(model.perturbation_op.build_shared_ecfp_features(fp_r).cpu().numpy())
 
         raw_cd_f = np.concatenate(raw_cd_chunks, axis=0).astype(np.float32)
-        cdm_new = raw_cd_f.mean(axis=0).astype(np.float32)
-        cds_std = raw_cd_f.std(axis=0).astype(np.float32)
+        ferro_cd = raw_cd_f[is_ferro_f > 0.5] if np.any(is_ferro_f > 0.5) else raw_cd_f
+        cdm_new = ferro_cd.mean(axis=0).astype(np.float32)
+        cds_std = ferro_cd.std(axis=0).astype(np.float32)
         cds_new = np.where(cds_std < 2e-2, 1.0, cds_std).astype(np.float32)
         model.perturbation_op.chem_dense_mean.copy_(torch.from_numpy(cdm_new).to(device=device))
         model.perturbation_op.chem_dense_scale.copy_(torch.from_numpy(cds_new).to(device=device))
@@ -958,7 +1191,6 @@ def fit_post_curriculum_greybox_from_train_indices(
 
         ecfp_sh_f = np.concatenate(ecfp_sh_chunks, axis=0).astype(np.float32)
         y_viab_f = idxr.viability_target[tr_f_arr].astype(np.float32)
-        is_ferro_f = idxr.is_ferroptosis_compound[tr_f_arr].astype(np.float32)
 
         hf_wb_list: list[np.ndarray] = []
         h_oth_list: list[np.ndarray] = []
@@ -974,11 +1206,7 @@ def fit_post_curriculum_greybox_from_train_indices(
         hf_wb_f = np.concatenate(hf_wb_list, axis=0)
         h_oth_f = np.concatenate(h_oth_list, axis=0)
         rsh_f = np.concatenate(rsh_list, axis=0)
-    # Leak-free inner compound-grouped validation (`80%` train compounds / `20%` val compounds strictly inside `train_indices`!)
-    # Automatically selects optimal `w_gb` (`0.0` if white-box + cuproptosis/apoptosis outperforms grey-box on unseen chemotypes!).
-    from scipy.stats import spearmanr
 
-    is_scaf_split = split_name == "1_leave_out_scaffold"
     gb_mods = (
         model.perturbation_op.chem_scaffold_inv_enc,
         model.perturbation_op.chem_shared_ecfp_enc,
@@ -998,22 +1226,22 @@ def fit_post_curriculum_greybox_from_train_indices(
                     + list(model.perturbation_op.chem_scaffold_fuse.parameters())
                     + list(model.diff_ferro_gem.aphynity_scaf_head.parameters())
                     + list(model.diff_ferro_gem.aphynity_scaf_ferro_gate.parameters()),
-                    "lr": 1.0e-3 if is_scaf_split else 7.5e-4,
+                    "lr": 1.0e-3,
                     "weight_decay": 1.5e-2,
                 },
                 {
                     "params": list(model.diff_ferro_gem.aphynity_scaf_cell_net.parameters()),
-                    "lr": 1.0e-3 if is_scaf_split else 5.5e-4,
-                    "weight_decay": 1.5e-2 if is_scaf_split else 8.0e-2,
+                    "lr": 1.0e-3,
+                    "weight_decay": 1.5e-2,
                 },
                 {
                     "params": list(model.perturbation_op.chem_shared_ecfp_enc.parameters()),
                     "lr": 4.0e-4,
-                    "weight_decay": 1.6e-1 if is_scaf_split else 5.0e-2,
+                    "weight_decay": 1.6e-1,
                 },
             ]
         )
-        bs_loc = 256
+        bs_loc = min(256, max(32, len(sub_idx_local) // 10))
         gb_sched_loc = torch.optim.lr_scheduler.CosineAnnealingLR(
             gb_opt_loc, T_max=max(1, n_epochs_run * ((len(sub_idx_local) + bs_loc - 1) // bs_loc))
         )
@@ -1059,26 +1287,40 @@ def fit_post_curriculum_greybox_from_train_indices(
                 h_tot_t = h_ferro_new + ho_t
                 vp_t = 0.99 * torch.exp(-h_tot_t.clamp(max=25.0)) + 0.01 / (1.0 + 0.25 * h_tot_t).pow(2)
 
-                if model.ablate_survivorship:
-                    l_hub = F.huber_loss(vp_t, yt_t, reduction="mean", delta=0.20)
-                    l_cor = l_hub.new_zeros(())
-                    l_rnk = l_hub.new_zeros(())
+                f_mask = isf_t > 0.5
+                if int(f_mask.sum().item()) >= 6:
+                    vp_f = vp_t[f_mask]
+                    yt_f = yt_t[f_mask]
+                    if model.ablate_survivorship:
+                        l_hub = F.huber_loss(vp_f, yt_f, reduction="mean", delta=0.20)
+                        l_cor = l_hub.new_zeros(())
+                        l_rnk = l_hub.new_zeros(())
+                    else:
+                        yt_c = yt_f.clamp(0.0, 1.0)
+                        cw_t = torch.from_numpy(cmpd_w_f[bi]).to(device=device)[f_mask]
+                        sw_t = (1.0 + 0.35 * (4.0 * yt_c * (1.0 - yt_c))) * cw_t
+                        l_hub = (F.huber_loss(vp_f, yt_f, reduction="none", delta=0.20) * sw_t).sum() / sw_t.sum().clamp(min=1e-6)
+                        w_sq = sw_t.sqrt()
+                        pc = (vp_f - (vp_f * sw_t).sum() / sw_t.sum().clamp(min=1e-6)) * w_sq
+                        tc = (yt_f - (yt_f * sw_t).sum() / sw_t.sum().clamp(min=1e-6)) * w_sq
+                        l_cor = 1.0 - (pc * tc).sum() / ((pc.pow(2).sum() + 1e-6).sqrt() * (tc.pow(2).sum() + 1e-6).sqrt())
+                        diff_y = yt_f.unsqueeze(1) - yt_f.unsqueeze(0)
+                        pm = (diff_y.abs() > 0.05).float()
+                        l_rnk = (
+                            F.softplus(-8.0 * (vp_f.unsqueeze(1) - vp_f.unsqueeze(0)) * torch.sign(diff_y)) * pm
+                        ).sum() / pm.sum().clamp(min=1.0)
                 else:
-                    yt_c = yt_t.clamp(0.0, 1.0)
-                    cw_t = torch.from_numpy(cmpd_w_f[bi]).to(device=device) if is_scaf_split else 1.0
-                    sw_t = (1.0 + 0.35 * (4.0 * yt_c * (1.0 - yt_c))) * cw_t
-                    l_hub = (F.huber_loss(vp_t, yt_t, reduction="none", delta=0.20) * sw_t).mean()
-                    w_sq = sw_t.sqrt()
-                    pc = (vp_t - (vp_t * sw_t).sum() / sw_t.sum()) * w_sq
-                    tc = (yt_t - (yt_t * sw_t).sum() / sw_t.sum()) * w_sq
-                    l_cor = 1.0 - (pc * tc).sum() / ((pc.pow(2).sum() + 1e-6).sqrt() * (tc.pow(2).sum() + 1e-6).sqrt())
-                    diff_y = yt_t.unsqueeze(1) - yt_t.unsqueeze(0)
-                    pm = (diff_y.abs() > 0.05).float()
-                    l_rnk = (
-                        F.softplus(-8.0 * (vp_t.unsqueeze(1) - vp_t.unsqueeze(0)) * torch.sign(diff_y)) * pm
-                    ).sum() / pm.sum().clamp(min=1.0)
-                l_fgate = F.binary_cross_entropy_with_logits(fgate_logit, isf_t) * 0.25
-                non_ferro_pen = ((1.0 - isf_t) * add_haz_t.pow(2)).mean() * 0.50
+                    l_hub = vp_t.new_zeros(())
+                    l_cor = vp_t.new_zeros(())
+                    l_rnk = vp_t.new_zeros(())
+
+                if float((1.0 - isf_t).sum().item()) > 0.5:
+                    l_fgate = F.binary_cross_entropy_with_logits(fgate_logit, isf_t) * 0.35
+                    non_ferro_pen = ((1.0 - isf_t) * (fgate_p * add_haz_t).pow(2)).mean() * 0.65
+                else:
+                    l_fgate = vp_t.new_zeros(())
+                    non_ferro_pen = vp_t.new_zeros(())
+
                 loss_gb = l_hub + 0.40 * l_cor + 0.35 * l_rnk + l_fgate + non_ferro_pen
                 gb_opt_loc.zero_grad(set_to_none=True)
                 loss_gb.backward()
@@ -1107,74 +1349,122 @@ def fit_post_curriculum_greybox_from_train_indices(
                 mod_g.load_state_dict(swa_gb[m_i])
 
     init_gb_state = {m_i: copy.deepcopy(mod_g.state_dict()) for m_i, mod_g in enumerate(gb_mods)}
+
+    # 100% Data-Driven Dual Inner Validation (Out-of-Cell -> w_in, Out-of-Scaffold -> w_ood) strictly inside `train_indices`
+    row_scafs = np.array(
+        [str(recs[int(ti)].get("murcko_scaffold") or f"cid_{int(idxr.row_chem_a_idx[int(ti)])}") for ti in tr_f_arr]
+    )
+    ferro_scafs = np.unique(row_scafs[is_ferro_f > 0.5])
+    ferro_cells = np.unique(cell_inv_f[is_ferro_f > 0.5])
+    oth_chems = np.unique(ca_f[is_ferro_f < 0.5])
     has_sar = int(model.perturbation_op.has_sar_snapshot.item()) > 0 and not model.ablate_chem_prior
-    if is_scaf_split:
-        default_blend = 0.86 if has_sar else 0.35
-    else:
-        default_blend = 0.26 if has_sar else 0.12
-    best_blend = default_blend
 
-    # Inner compound-grouped holdout strictly when non-ferroptosis compounds are present in `tr_f_arr`
-    if len(u_chems) >= 10 and float((1.0 - is_ferro_f).sum()) >= 64.0:
-        perm_ch = rng.permutation(u_chems)
-        n_val_ch = max(2, len(u_chems) // 4)
-        val_ch_set = set(perm_ch[:n_val_ch].tolist())
-        is_val_row = np.array([int(c_id) in val_ch_set for c_id in ca_f], dtype=bool)
-        in_tr_idx = np.where(~is_val_row)[0]
-        in_va_idx = np.where(is_val_row)[0]
-        if len(in_tr_idx) >= 64 and len(in_va_idx) >= 32:
-            _fit_gb_on_mask(in_tr_idx, 10, 0.35)
-            model.eval()
-            with torch.no_grad():
-                cd_v = torch.from_numpy(cd_std_f[in_va_idx]).to(device=device)
-                ef_v = torch.from_numpy(ecfp_sh_f[in_va_idx]).to(device=device)
-                cx_v = torch.from_numpy(cell_std_u[cell_inv_f[in_va_idx]]).to(device=device)
-                zc_v = F.silu(
-                    model.perturbation_op.chem_scaffold_fuse(
-                        torch.cat(
-                            [
-                                model.perturbation_op.chem_scaffold_inv_enc(cd_v),
-                                model.perturbation_op.chem_shared_ecfp_enc(ef_v),
-                            ],
-                            dim=-1,
+    best_w_in = 0.0 if include_non_ferro else 0.16
+    best_w_ood = 0.0 if include_non_ferro else (0.88 if has_sar else 0.38)
+    best_epochs_full = 15
+    if len(ferro_scafs) >= 5 and len(ferro_cells) >= 12:
+        val_scaf_set = set(rng.permutation(ferro_scafs)[: max(2, len(ferro_scafs) // 4)].tolist())
+        val_cell_set = set(rng.permutation(ferro_cells)[: max(3, len(ferro_cells) // 5)].tolist())
+        val_oth_set = (
+            set(rng.permutation(oth_chems)[: max(1, len(oth_chems) // 4)].tolist()) if len(oth_chems) >= 4 else set()
+        )
+
+        is_val_scaf = np.array([(s in val_scaf_set) and (isf > 0.5) for s, isf in zip(row_scafs, is_ferro_f)], dtype=bool)
+        is_val_cell = np.array(
+            [(int(c) in val_cell_set) and (isf > 0.5) and (s not in val_scaf_set) for c, s, isf in zip(cell_inv_f, row_scafs, is_ferro_f)],
+            dtype=bool,
+        )
+        is_val_oth = np.array([(int(cid) in val_oth_set) and (isf < 0.5) for cid, isf in zip(ca_f, is_ferro_f)], dtype=bool)
+        in_tr_mask = (~is_val_scaf) & (~is_val_cell) & (~is_val_oth)
+        in_tr_idx = np.where(in_tr_mask)[0]
+        in_va_all = np.where(~in_tr_mask)[0]
+
+        if len(in_tr_idx) >= 96 and int(is_val_scaf.sum()) >= 24 and int(is_val_cell.sum()) >= 24:
+            def _eval_inner_gb() -> tuple[np.ndarray, np.ndarray]:
+                model.eval()
+                with torch.no_grad():
+                    radd_va_list: list[np.ndarray] = []
+                    fg_va_list: list[np.ndarray] = []
+                    for s_i in range(0, len(in_va_all), 512):
+                        vi = in_va_all[s_i : s_i + 512]
+                        cd_v = torch.from_numpy(cd_std_f[vi]).to(device=device)
+                        ef_v = torch.from_numpy(ecfp_sh_f[vi]).to(device=device)
+                        cx_v = torch.from_numpy(cell_std_u[cell_inv_f[vi]]).to(device=device)
+                        zc_v = F.silu(
+                            model.perturbation_op.chem_scaffold_fuse(
+                                torch.cat(
+                                    [
+                                        model.perturbation_op.chem_scaffold_inv_enc(cd_v),
+                                        model.perturbation_op.chem_shared_ecfp_enc(ef_v),
+                                    ],
+                                    dim=-1,
+                                )
+                            )
                         )
-                    )
-                )
-                zx_v = model.diff_ferro_gem.aphynity_scaf_cell_net(cx_v)
-                radd_v = model.diff_ferro_gem.aphynity_scaf_head(torch.cat([zc_v, zx_v, zc_v * zx_v], dim=-1)).squeeze(-1).cpu().numpy()
-                fg_v = (1.0 / (1.0 + np.exp(-model.diff_ferro_gem.aphynity_scaf_ferro_gate(zc_v).squeeze(-1).cpu().numpy())))
-                add_v = np.log1p(np.exp(np.clip(radd_v - 1.2, -20.0, 20.0))) * rsh_f[in_va_idx]
-                yt_v = y_viab_f[in_va_idx]
-                hf_v = hf_wb_f[in_va_idx]
-                ho_v = h_oth_f[in_va_idx]
+                        zx_v = model.diff_ferro_gem.aphynity_scaf_cell_net(cx_v)
+                        ra_v = model.diff_ferro_gem.aphynity_scaf_head(torch.cat([zc_v, zx_v, zc_v * zx_v], dim=-1)).squeeze(-1)
+                        fg_l = model.diff_ferro_gem.aphynity_scaf_ferro_gate(zc_v).squeeze(-1)
+                        radd_va_list.append(ra_v.cpu().numpy())
+                        fg_va_list.append(torch.sigmoid(fg_l).cpu().numpy())
+                    radd_all = np.zeros(len(tr_f_arr), dtype=np.float32)
+                    fg_all = np.ones(len(tr_f_arr), dtype=np.float32)
+                    radd_all[in_va_all] = np.concatenate(radd_va_list, axis=0)
+                    fg_all[in_va_all] = np.concatenate(fg_va_list, axis=0)
+                    add_all = np.log1p(np.exp(np.clip(radd_all - 1.2, -20.0, 20.0))) * rsh_f
+                    return add_all, fg_all
 
-                def _eval_w(w_cand: float) -> float:
-                    eff_w = w_cand * fg_v
-                    ht = (1.0 - eff_w) * hf_v + eff_w * add_v + ho_v
-                    vp = 0.99 * np.exp(-np.clip(ht, 0.0, 25.0)) + 0.01 / ((1.0 + 0.25 * ht) ** 2)
-                    r_val = float(spearmanr(yt_v, vp).statistic)
-                    return 0.0 if np.isnan(r_val) else r_val
+            def _rho_sub_arr(add_arr: np.ndarray, fg_arr: np.ndarray, mask_b: np.ndarray, w_cand: float) -> float:
+                if int(mask_b.sum()) < 8:
+                    return 0.0
+                eff_w = w_cand * fg_arr[mask_b]
+                ht = (1.0 - eff_w) * hf_wb_f[mask_b] + eff_w * add_arr[mask_b] + h_oth_f[mask_b]
+                vp = 0.99 * np.exp(-np.clip(ht, 0.0, 25.0)) + 0.01 / ((1.0 + 0.25 * ht) ** 2)
+                yv = y_viab_f[mask_b]
+                if np.std(yv) < 1e-8 or np.std(vp) < 1e-8:
+                    return 0.0
+                rv = float(spearmanr(yv, vp).statistic)
+                return 0.0 if np.isnan(rv) else rv
 
-                rho_wb = _eval_w(0.0)
-                best_rho = rho_wb
-                best_blend = 0.0
-                for w_c in (0.12, 0.25, 0.45, 0.65):
-                    r_c = _eval_w(w_c)
-                    if r_c > best_rho + 0.004:
-                        best_rho = r_c
-                        best_blend = w_c
+            if include_non_ferro and int(is_val_oth.sum()) >= 24:
+                _fit_gb_on_mask(in_tr_idx, 10, 0.35)
+                add_all, fg_all = _eval_inner_gb()
+                ood_mask = is_val_scaf | is_val_oth
+                r_ood0 = _rho_sub_arr(add_all, fg_all, ood_mask, 0.0)
+                best_ood = r_ood0
+                best_w_ood = 0.0
+                for w_c in (0.15, 0.30, 0.50):
+                    ro_v = _rho_sub_arr(add_all, fg_all, ood_mask, w_c)
+                    if ro_v > best_ood + 0.004:
+                        best_ood = ro_v
+                        best_w_ood = w_c
+                best_w_in = min(0.04, best_w_ood)
+            else:
+                _fit_gb_on_mask(in_tr_idx, 12, 0.88 if has_sar else 0.40)
+                add_all, fg_all = _eval_inner_gb()
+                best_cell_r = _rho_sub_arr(add_all, fg_all, is_val_cell, 0.08)
+                best_w_in = 0.08
+                for w_ci in (0.18, 0.30, 0.45, 0.58):
+                    rc_v = _rho_sub_arr(add_all, fg_all, is_val_cell, w_ci)
+                    if rc_v > best_cell_r + 0.0015:
+                        best_cell_r = rc_v
+                        best_w_in = w_ci
 
             for m_i, mod_g in enumerate(gb_mods):
                 mod_g.load_state_dict(init_gb_state[m_i])
 
-    if best_blend <= 1e-4:
+    if max(best_w_in, best_w_ood) <= 1e-3:
         with torch.no_grad():
             model.diff_ferro_gem.scaf_gb_ready.zero_()
         model.eval()
         return
 
-    _fit_gb_on_mask(np.arange(len(tr_f_arr), dtype=np.int64), 15 if is_scaf_split else 10, best_blend)
+    fit_blend = float(np.clip(max(0.55, best_w_in, best_w_ood), 0.20, 0.88))
+    _fit_gb_on_mask(np.arange(len(tr_f_arr), dtype=np.int64), best_epochs_full, fit_blend)
     with torch.no_grad():
+        win_c = float(np.clip(best_w_in, 1e-4, 0.999))
+        wood_c = float(np.clip(best_w_ood, 1e-4, 0.999))
+        model.diff_ferro_gem.raw_scaf_gb_blend.fill_(float(math.log(win_c / (1.0 - win_c))))
+        model.diff_ferro_gem.raw_scaf_gb_blend_ood.fill_(float(math.log(wood_c / (1.0 - wood_c))))
         model.diff_ferro_gem.scaf_gb_ready.fill_(1.0)
     model.eval()
 
@@ -1221,19 +1511,13 @@ def warmstart_crispr_joint_and_svd(
     mc_u = idxr.cell_mask[uniq_c]
     cnt_m_u = np.maximum(mc_u.sum(axis=1, keepdims=True), 1.0)
     xm_u = (xc_u * mc_u).sum(axis=1, keepdims=True) / cnt_m_u
-    xcent_u = (xc_u - xm_u) * mc_u
+    xvar_u = (((xc_u - xm_u) * mc_u) ** 2).sum(axis=1, keepdims=True) / cnt_m_u
+    xcent_u = (((xc_u - xm_u) / np.sqrt(xvar_u + 0.25)) * mc_u).astype(np.float32)
 
-    extra_u = (
-        np.zeros((len(uniq_c), 234), dtype=np.float32)
-        if model.ablate_physical_anchors
-        else np.concatenate(
-            [
-                idxr.cell_genomic[uniq_c],
-                idxr.cell_prot64[uniq_c] * idxr.cell_prot64_mask[uniq_c],
-                idxr.cell_lipid32[uniq_c] * idxr.cell_lipid32_mask[uniq_c],
-            ],
-            axis=1,
-        )
+    ctx_m_np = model.ctx_obs_mean.detach().cpu().numpy()
+    ctx_s_np = model.ctx_obs_scale.detach().cpu().numpy()
+    extra_u, _ = _compute_standardized_extra_ctx_np(
+        idxr, uniq_c, ctx_m_np, ctx_s_np, model.ablate_physical_anchors
     )
 
     model.eval()
@@ -1288,7 +1572,7 @@ def warmstart_crispr_joint_and_svd(
         b_g = (rhs_g - b_mat.T @ w_c) / cnt_g
         pred_off_u = (u_c @ w_c).astype(np.float64)
 
-        # Within-gene centered expression slope (`cov(x_cent, y_res) / (var(x_cent) + 35.0)`)
+        # Within-gene standardized expression slope (`cov(x_cent, y_res) / (var(x_cent) + 35.0)`)
         y_res1 = y_rows - pred_off_u[c_inv] - b_g[g_rows]
         x_at_ko = xcent_u[c_inv, g_rows].astype(np.float64)
         cov_xy = np.bincount(g_rows, weights=x_at_ko * y_res1, minlength=n_genes)
@@ -1479,12 +1763,16 @@ def train_single_seed(
     rng_seed = np.random.default_rng(seed + rank)
 
     # Warm-start Stage-0.5 SAR chemical representation first, then spectral/physical-anchor/CRISPR priors
+    has_recs = hasattr(dataset, "records") and isinstance(dataset.records, list)
+    all_tr_idx = list(range(len(dataset.records))) if has_recs else []
     if start_stage == 1 and start_epoch == 0 and not smoke_test:
         sar_info = pretrain_stage05_chem_sar(
             raw_model,
             data_dir=data_dir,
             license_track=license_track,
             device=device,
+            train_dataset=dataset if has_recs else None,
+            train_indices=all_tr_idx if has_recs else None,
             epochs=8,
             batch_size=256,
             seed=seed,
@@ -1498,11 +1786,11 @@ def train_single_seed(
                 flush=True,
             )
 
-        if hasattr(dataset, "records") and isinstance(dataset.records, list):
+        if has_recs:
             warmstart_from_train_indices(
                 raw_model,
                 dataset,
-                list(range(len(dataset.records))),
+                all_tr_idx,
                 device=device,
                 seed=seed,
             )
@@ -1581,7 +1869,11 @@ def train_single_seed(
                 gene_emb_p.append(p)
             elif "perturbation_op.chem_shared_ecfp_enc." in n:
                 ecfp_shared_p.append(p)
-            elif "diff_ferro_gem.aphynity_" in n or "perturbation_op.chem_scaffold_" in n:
+            elif (
+                "diff_ferro_gem.aphynity_" in n
+                or "perturbation_op.chem_scaffold_" in n
+                or n.endswith(("raw_scaf_gb_blend", "raw_scaf_gb_blend_ood"))
+            ):
                 greybox_p.append(p)
             elif "perturbation_op.sar_pretrain_head." in n:
                 sar_head_p.append(p)
@@ -1717,14 +2009,34 @@ def train_single_seed(
                 )
                 tmp_res.replace(resume_ckpt_path)
 
-        if stage_num == 1 and not smoke_test and not use_ddp and hasattr(dataset, "records") and isinstance(dataset.records, list):
+        if stage_num == 1 and not smoke_test and not use_ddp and has_recs:
             warmstart_crispr_joint_and_svd(
                 raw_model,
                 dataset,
-                list(range(len(dataset.records))),
+                all_tr_idx,
                 device=device,
                 seed=seed,
             )
+
+    if not smoke_test and not use_ddp and has_recs:
+        with torch.no_grad():
+            raw_model.perturbation_op.cell_bioact_film[-1].weight.mul_(0.18)
+            if raw_model.perturbation_op.cell_bioact_film[-1].bias is not None:
+                raw_model.perturbation_op.cell_bioact_film[-1].bias.mul_(0.18)
+        fit_post_curriculum_greybox_from_train_indices(
+            raw_model,
+            dataset,
+            all_tr_idx,
+            device=device,
+            seed=seed,
+        )
+        calibrate_mgm_decoder_from_train_indices(
+            raw_model,
+            dataset,
+            all_tr_idx,
+            device=device,
+            seed=seed,
+        )
 
     total_sec = time.perf_counter() - t_seed_start
 

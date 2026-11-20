@@ -72,6 +72,9 @@ _CANONICAL_PATHWAY_GENES: dict[str, tuple[str, ...]] = {
     "cupro_tca": ("FDX1", "LIAS", "LIPT1", "DLD", "DLAT", "PDHA1", "PDHB", "ACO2", "SDHB", "IDH2"),
     "anchor_28": ANCHOR_28_PROTEINS,
     "sec46_full": SEC_MACHINERY_GENES + IPP_MEVALONATE_GENES + ("GPX4",),
+    "secisbp2": ("SECISBP2",),
+    "lrp8": ("LRP8",),
+    "trit1": ("TRIT1",),
     "cis_64": CANONICAL_64_FERROPTOSIS_LOCI,
 }
 
@@ -171,6 +174,12 @@ class FerroFluxFM(nn.Module):
         )
 
         # Multi-omic context fusion (138 genomic CNV/LOF/hotspots + 64 MS proteome + 32 LC-MS lipids)
+        self.register_buffer("ctx_obs_mean", torch.zeros(EXTRA_CELL_CTX_DIM, dtype=torch.float32), persistent=True)
+        self.register_buffer("ctx_obs_scale", torch.ones(EXTRA_CELL_CTX_DIM, dtype=torch.float32), persistent=True)
+        self.multiomic_to_prot_anchor = nn.Linear(64 + 32, len(ANCHOR_28_PROTEINS), bias=False)
+        self.multiomic_to_metab_anchor = nn.Linear(64 + 32, len(ANCHOR_12_METABOLITES), bias=False)
+        nn.init.zeros_(self.multiomic_to_prot_anchor.weight)
+        nn.init.zeros_(self.multiomic_to_metab_anchor.weight)
         self.multiomic_ctx_fusion = nn.Sequential(
             nn.Linear(EXTRA_CELL_CTX_DIM, self.d_model),
             nn.LayerNorm(self.d_model),
@@ -180,14 +189,16 @@ class FerroFluxFM(nn.Module):
         nn.init.zeros_(self.multiomic_ctx_fusion[-1].weight)
         nn.init.zeros_(self.multiomic_ctx_fusion[-1].bias)
 
-        # Row-centered observed transcriptome projection (`[B, n_genes] -> [B, 128]`, respects all masks!)
+        # Row-standardized observed transcriptome projection (`[B, n_genes] -> [B, 128]`, respects all masks!)
         self.expr_ctx_proj = nn.Sequential(
             nn.Linear(self.n_genes, 128),
             nn.LayerNorm(128),
             nn.SiLU(),
             nn.Dropout(0.08),
         )
-        self.mgm_ctx_decoder = nn.Linear(self.d_model + 128, self.n_genes)
+        self.mgm_svd_proj = nn.Linear(self.n_genes, 256, bias=False)
+        nn.init.zeros_(self.mgm_svd_proj.weight)
+        self.mgm_ctx_decoder = nn.Linear(self.d_model + 256, self.n_genes)
         nn.init.zeros_(self.mgm_ctx_decoder.weight)
         nn.init.zeros_(self.mgm_ctx_decoder.bias)
         self._pathway_idx_map: dict[str, list[int]] = _resolve_pathway_idx_map(self.n_genes)
@@ -384,6 +395,116 @@ class FerroFluxFM(nn.Module):
                 x = x * m
         return x
 
+    def _build_sec46_inputs(
+        self,
+        p_hat: torch.Tensor,
+        gene_mult: torch.Tensor | None,
+        m0_hat_log: torch.Tensor | None,
+        gene_expr_raw: torch.Tensor | None,
+        gene_expr_mask: torch.Tensor | None,
+        hmgcr_occ: torch.Tensor | None,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        device = p_hat.device
+        gm_mult = gene_mult.clamp(min=1e-4) if gene_mult is not None else torch.ones_like(p_hat)
+        p_eff_log = torch.log((p_hat * gm_mult).clamp(min=1e-5))
+        gpx4_log = p_eff_log[:, PROTEIN_TO_IDX["GPX4"]]
+
+        p_basal_ref_log = torch.log(
+            F.softplus(self.perceiver_trunk.anchor_mrna_log_basal.to(device=device, dtype=dtype)) + 0.05
+        )
+        p_rel_log = p_eff_log - p_basal_ref_log.unsqueeze(0)
+
+        pstk_rel = p_rel_log[:, PROTEIN_TO_IDX["PSTK"]]
+        sepsecs_rel = p_rel_log[:, PROTEIN_TO_IDX["SEPSECS"]]
+        sephs2_rel = p_rel_log[:, PROTEIN_TO_IDX["SEPHS2"]]
+        eefsec_rel = p_rel_log[:, PROTEIN_TO_IDX["EEFSEC"]]
+        hmgcr_rel = p_rel_log[:, PROTEIN_TO_IDX["HMGCR"]]
+        sqle_rel = p_rel_log[:, PROTEIN_TO_IDX["SQLE"]]
+
+        secisbp2_rel = pstk_rel
+        lrp8_rel = sephs2_rel
+        trit1_rel = 0.5 * (hmgcr_rel + sqle_rel)
+
+        if gene_expr_raw is not None:
+            with torch.no_grad():
+                gx_c = torch.nan_to_num(gene_expr_raw.to(device=device, dtype=dtype), nan=0.0, posinf=15.0, neginf=-15.0)
+                if gx_c.ndim == 1:
+                    gx_c = gx_c.unsqueeze(0)
+                gm_c = (
+                    torch.nan_to_num(gene_expr_mask.to(device=device, dtype=dtype), nan=1.0).clamp(0.0, 1.0)
+                    if gene_expr_mask is not None
+                    else torch.ones_like(gx_c)
+                )
+                if gm_c.ndim == 1:
+                    gm_c = gm_c.unsqueeze(0)
+                rcnt = gm_c.sum(dim=-1, keepdim=True).clamp(min=1.0)
+                rmu = (gx_c * gm_c).sum(dim=-1, keepdim=True) / rcnt
+                rvar = ((gx_c - rmu) * gm_c).pow(2).sum(dim=-1, keepdim=True) / rcnt
+                gx_rel = ((gx_c - rmu) / (rvar + 0.25).sqrt()) * gm_c
+            pstk_ko_log = torch.log(gm_mult[:, PROTEIN_TO_IDX["PSTK"]])
+            hmgcr_ko_log = torch.log(gm_mult[:, PROTEIN_TO_IDX["HMGCR"]])
+
+            sb_idx = self._pathway_idx_map.get("secisbp2", [])
+            if sb_idx and sb_idx[0] < gx_c.shape[1]:
+                i_sb = sb_idx[0]
+                secisbp2_rel = torch.where(gm_c[:, i_sb] > 0.5, gx_rel[:, i_sb] + pstk_ko_log, secisbp2_rel)
+            lrp_idx = self._pathway_idx_map.get("lrp8", [])
+            if lrp_idx and lrp_idx[0] < gx_c.shape[1]:
+                i_lrp = lrp_idx[0]
+                lrp8_rel = torch.where(gm_c[:, i_lrp] > 0.5, gx_rel[:, i_lrp] + pstk_ko_log, lrp8_rel)
+            tr_idx = self._pathway_idx_map.get("trit1", [])
+            if tr_idx and tr_idx[0] < gx_c.shape[1]:
+                i_tr = tr_idx[0]
+                trit1_rel = torch.where(gm_c[:, i_tr] > 0.5, gx_rel[:, i_tr] + hmgcr_ko_log, trit1_rel)
+
+        sec_machinery_log = torch.stack(
+            [pstk_rel, sepsecs_rel, sephs2_rel, eefsec_rel, secisbp2_rel, lrp8_rel],
+            dim=-1,
+        )
+        ipp_log = (hmgcr_rel + sqle_rel + trit1_rel) / 3.0
+        if hmgcr_occ is not None:
+            ipp_log = ipp_log - 3.2 * hmgcr_occ
+        dock_log: torch.Tensor | None = None
+        if m0_hat_log is not None and m0_hat_log.shape[-1] > METABOLITE_TO_IDX["PE_PUFA"]:
+            dock_log = 0.5 * (
+                m0_hat_log[:, METABOLITE_TO_IDX["PE_PUFA"]] + m0_hat_log[:, METABOLITE_TO_IDX["PC_PUFA2"]]
+            )
+        return gpx4_log, sec_machinery_log, ipp_log, dock_log
+
+    def compute_basal_sec46_features(
+        self,
+        gene_expr_raw: torch.Tensor | None,
+        gene_expr_mask: torch.Tensor | None,
+        p_hat: torch.Tensor,
+        m0_hat_log: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Compute 3 basal Sec46 selenoprotein translational state features (`0`-masked when `ablate_sec46_gate=True`)."""
+        dtype = p_hat.dtype
+        device = p_hat.device
+        bsz = p_hat.shape[0]
+        if self.ablate_sec46_gate:
+            return torch.zeros(bsz, 3, device=device, dtype=dtype)
+        gpx4_b, sec_m_b, ipp_b, dock_b = self._build_sec46_inputs(
+            p_hat=p_hat,
+            gene_mult=None,
+            m0_hat_log=m0_hat_log,
+            gene_expr_raw=gene_expr_raw,
+            gene_expr_mask=gene_expr_mask,
+            hmgcr_occ=None,
+            dtype=dtype,
+        )
+        sec_b = self.sec46_gate.compute_active_gpx4(
+            gpx4_expr=gpx4_b,
+            sec_machinery=sec_m_b,
+            ipp_level=ipp_b,
+            membrane_docking=dock_b,
+        )
+        se_eff = sec_b["sec_readthrough_eff"]
+        ip_eff = sec_b["ipp_trna_mod_eff"]
+        holo_b = (p_hat[:, PROTEIN_TO_IDX["GPX4"]].clamp(min=1e-4) * se_eff * ip_eff).log1p()
+        return torch.stack([se_eff, ip_eff, holo_b], dim=-1)
+
     def _compute_sec46_and_gem(
         self,
         z_cell: torch.Tensor,
@@ -398,33 +519,35 @@ class FerroFluxFM(nn.Module):
         gene_expr_raw: torch.Tensor | None = None,
         gene_expr_mask: torch.Tensor | None = None,
         cis_locus_ctx: torch.Tensor | None = None,
+        extra_cell_mask: torch.Tensor | None = None,
+        cis_locus_mask: torch.Tensor | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], torch.Tensor]:
         target_occ = pert_dict["target_occ"]
         gene_mult = pert_dict["gene_mult"]
         media_vec = pert_dict["media_vec"]
 
-        p_eff_log = torch.log((p_hat * gene_mult.clamp(min=1e-4)).clamp(min=1e-5))
-        gpx4_log = p_eff_log[:, PROTEIN_TO_IDX["GPX4"]]
-        sec_machinery_log = torch.stack(
-            [
-                p_eff_log[:, PROTEIN_TO_IDX["PSTK"]],
-                p_eff_log[:, PROTEIN_TO_IDX["SEPSECS"]],
-                p_eff_log[:, PROTEIN_TO_IDX["SEPHS2"]],
-                p_eff_log[:, PROTEIN_TO_IDX["EEFSEC"]],
-            ],
-            dim=-1,
-        )
-        ipp_log = (
-            0.5 * (p_eff_log[:, PROTEIN_TO_IDX["HMGCR"]] + p_eff_log[:, PROTEIN_TO_IDX["SQLE"]])
-            - 3.2 * target_occ[:, TARGET_TO_IDX["HMGCR"]]
+        gpx4_log, sec_machinery_log, ipp_log, dock_log = self._build_sec46_inputs(
+            p_hat=p_hat,
+            gene_mult=gene_mult,
+            m0_hat_log=m0_hat_log,
+            gene_expr_raw=gene_expr_raw,
+            gene_expr_mask=gene_expr_mask,
+            hmgcr_occ=target_occ[:, TARGET_TO_IDX["HMGCR"]],
+            dtype=dtype,
         )
         sec_out = self.sec46_gate.compute_active_gpx4(
             gpx4_expr=gpx4_log,
             sec_machinery=sec_machinery_log,
             ipp_level=ipp_log,
             se_media=media_vec[:, 3],
+            membrane_docking=dock_log,
             gpx4_covalent_occ=target_occ[:, TARGET_TO_IDX["GPX4_cov"]],
             gpx4_degrader_occ=target_occ[:, TARGET_TO_IDX["GPX4_deg"]],
+        )
+        sec_basal_3 = (
+            self.compute_basal_sec46_features(gene_expr_raw, gene_expr_mask, p_hat, m0_hat_log)
+            if float(self.diff_ferro_gem.scaf_gb_ready.item()) > 0.5
+            else None
         )
         gem_out = self.diff_ferro_gem(
             z_cell,
@@ -437,10 +560,13 @@ class FerroFluxFM(nn.Module):
             ipp_trna_mod_eff=sec_out["ipp_trna_mod_eff"],
             pert_effects=pert_dict,
             extra_cell_ctx=extra_cell_ctx,
+            extra_cell_mask=extra_cell_mask,
             gene_expr_ctx=gene_expr_ctx,
             gene_expr_raw=gene_expr_raw,
             gene_expr_mask=gene_expr_mask,
             cis_locus_ctx=cis_locus_ctx,
+            cis_locus_mask=cis_locus_mask,
+            sec_basal_3=sec_basal_3,
         )
         pl_ooh = gem_out["pl_ooh"]
         g_rupture = gem_out["g_rupture"]
@@ -490,6 +616,10 @@ class FerroFluxFM(nn.Module):
         gt_imm_mask: torch.Tensor | None = None
         if self.training:
             x_full_tr, obs_full_tr = self.perceiver_trunk._align_genes(gene_expr, expr_mask)
+            cnt_f = obs_full_tr.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            mu_f = (x_full_tr * obs_full_tr).sum(dim=-1, keepdim=True) / cnt_f
+            sd_f = (((x_full_tr - mu_f) * obs_full_tr).pow(2).sum(dim=-1, keepdim=True) / cnt_f + 1e-4).sqrt()
+            xz_full_tr = ((x_full_tr - mu_f) / sd_f) * obs_full_tr
             gt_cols: list[torch.Tensor] = []
             gt_mcols: list[torch.Tensor] = []
             pmap = self._pathway_idx_map
@@ -498,7 +628,7 @@ class FerroFluxFM(nn.Module):
                     u_i, d_i = pmap.get("sterol_up", []), pmap.get("sterol_down", [])
                     if u_i and d_i:
                         mu = obs_full_tr[:, u_i].min(dim=-1).values * obs_full_tr[:, d_i].min(dim=-1).values
-                        val = x_full_tr[:, u_i].mean(dim=-1) - x_full_tr[:, d_i].mean(dim=-1)
+                        val = xz_full_tr[:, u_i].mean(dim=-1) - xz_full_tr[:, d_i].mean(dim=-1)
                         gt_cols.append(val)
                         gt_mcols.append((mu > 0.5).to(dtype=dtype))
                     else:
@@ -508,7 +638,7 @@ class FerroFluxFM(nn.Module):
                     m1_i, m2_i = pmap.get("m1_tam", []), pmap.get("m2_tam", [])
                     if m1_i and m2_i:
                         mu = (obs_full_tr[:, m1_i].sum(dim=-1) > 0) & (obs_full_tr[:, m2_i].sum(dim=-1) > 0)
-                        val = x_full_tr[:, m1_i].mean(dim=-1) - x_full_tr[:, m2_i].mean(dim=-1)
+                        val = xz_full_tr[:, m1_i].mean(dim=-1) - xz_full_tr[:, m2_i].mean(dim=-1)
                         gt_cols.append(val)
                         gt_mcols.append(mu.to(dtype=dtype))
                     else:
@@ -518,7 +648,7 @@ class FerroFluxFM(nn.Module):
                     idx_l = pmap.get(p_spec, [])
                     if idx_l:
                         cnt_l = obs_full_tr[:, idx_l].sum(dim=-1)
-                        val = (x_full_tr[:, idx_l] * obs_full_tr[:, idx_l]).sum(dim=-1) / cnt_l.clamp(min=1.0)
+                        val = (xz_full_tr[:, idx_l] * obs_full_tr[:, idx_l]).sum(dim=-1) / cnt_l.clamp(min=1.0)
                         gt_cols.append(val)
                         gt_mcols.append((cnt_l >= max(1, len(idx_l) // 2)).to(dtype=dtype))
                     else:
@@ -594,13 +724,29 @@ class FerroFluxFM(nn.Module):
         # Extract optional basal genomic/proteomic/lipidomic context (zeroed when ablate_physical_anchors=True)
         if self.ablate_physical_anchors:
             extra_cell_ctx = torch.zeros(bsz, EXTRA_CELL_CTX_DIM, device=device, dtype=dtype)
+            extra_cell_mask = torch.zeros(bsz, EXTRA_CELL_CTX_DIM, device=device, dtype=dtype)
         else:
             genomic_138 = self._align_ctx_field(batch, "genomic_context", None, bsz, 138, device, dtype)
+            gen_m = (genomic_138.abs().sum(dim=-1, keepdim=True) > 1e-6).expand_as(genomic_138).to(dtype=dtype)
             prot_64 = self._align_ctx_field(batch, "prot64_context", "prot64_mask", bsz, 64, device, dtype)
+            prot64_m = (
+                self._align_ctx_field(batch, "prot64_mask", None, bsz, 64, device, dtype).clamp(0.0, 1.0)
+                if isinstance(batch.get("prot64_mask"), torch.Tensor)
+                else (prot_64.abs() > 1e-6).to(dtype=dtype)
+            )
             lipid_32 = self._align_ctx_field(batch, "lipid32_context", "lipid32_mask", bsz, 32, device, dtype)
-            extra_cell_ctx = torch.cat([genomic_138, prot_64, lipid_32], dim=-1)
+            lipid32_m = (
+                self._align_ctx_field(batch, "lipid32_mask", None, bsz, 32, device, dtype).clamp(0.0, 1.0)
+                if isinstance(batch.get("lipid32_mask"), torch.Tensor)
+                else (lipid_32.abs() > 1e-6).to(dtype=dtype)
+            )
+            raw_ctx = torch.cat([genomic_138, prot_64, lipid_32], dim=-1)
+            extra_cell_mask = torch.cat([gen_m, prot64_m, lipid32_m], dim=-1)
+            ctx_m_ref = self.ctx_obs_mean.to(device=device, dtype=dtype).unsqueeze(0)
+            ctx_s_ref = self.ctx_obs_scale.to(device=device, dtype=dtype).clamp(min=2e-2).unsqueeze(0)
+            extra_cell_ctx = (((raw_ctx - ctx_m_ref) / ctx_s_ref) * extra_cell_mask).clamp(-6.0, 6.0)
             if self.training:
-                extra_cell_ctx = F.dropout(extra_cell_ctx, p=0.12, training=True)
+                extra_cell_ctx = F.dropout(extra_cell_ctx, p=0.15, training=True)
 
         # 2. Perceiver module trunk + 28 protein & 12 metabolite physical anchors + observed-only expr context
         x_aligned, obs_mask_aligned = self.perceiver_trunk._align_genes(gene_expr, expr_mask)
@@ -611,7 +757,10 @@ class FerroFluxFM(nn.Module):
             eff_obs_m = obs_mask_aligned
         obs_cnt = eff_obs_m.sum(dim=-1, keepdim=True).clamp(min=1.0)
         x_obs_mean = (x_aligned * eff_obs_m).sum(dim=-1, keepdim=True) / obs_cnt
-        x_obs_centered = (x_aligned - x_obs_mean) * eff_obs_m
+        x_obs_var = ((x_aligned - x_obs_mean) * eff_obs_m).pow(2).sum(dim=-1, keepdim=True) / obs_cnt
+        x_obs_std = (x_obs_var + 1e-4).sqrt()
+        x_obs_z = ((x_aligned - x_obs_mean) / x_obs_std) * eff_obs_m
+        x_obs_centered = ((x_aligned - x_obs_mean) / (x_obs_var + 0.25).sqrt()) * eff_obs_m
         gene_expr_ctx = self.expr_ctx_proj(x_obs_centered)
 
         trunk_out = self.perceiver_trunk(
@@ -621,19 +770,33 @@ class FerroFluxFM(nn.Module):
             mgm_keep_mask=mgm_keep_mask,
         )
         z_cell = trunk_out["z_cell"] + self.multiomic_ctx_fusion(extra_cell_ctx) + 0.25 * cis_tokens.mean(dim=1)
-        p_hat = trunk_out["p_hat"]
-        m0_hat = trunk_out["m0_hat"]
-        p_hat_log = trunk_out["p_hat_log"]
-        m0_hat_log = trunk_out["m0_hat_log"]
+        if self.ablate_physical_anchors:
+            p_hat = trunk_out["p_hat"]
+            m0_hat = trunk_out["m0_hat"]
+            p_hat_log = trunk_out["p_hat_log"]
+            m0_hat_log = trunk_out["m0_hat_log"]
+        else:
+            pl_ctx = extra_cell_ctx[:, 138:]
+            p_hat_log = trunk_out["p_hat_log"] + self.multiomic_to_prot_anchor(pl_ctx)
+            m0_hat_log = trunk_out["m0_hat_log"] + self.multiomic_to_metab_anchor(pl_ctx)
+            p_hat = F.softplus(p_hat_log + self.perceiver_trunk.anchor_mrna_log_basal.to(dtype=dtype)) + 0.05
+            m0_hat = F.softplus(m0_hat_log + 0.65) + 0.05
 
-        mgm_delta_ctx = self.mgm_ctx_decoder(torch.cat([z_cell, gene_expr_ctx], dim=-1))
+        mgm_lat = self.mgm_svd_proj(x_obs_z)
+        mgm_z_delta = self.mgm_ctx_decoder(torch.cat([z_cell, mgm_lat], dim=-1))
+        trunk_rec_al, _ = self.perceiver_trunk._align_genes(trunk_out["mgm_recon"])
+        trunk_rec_rel = (trunk_rec_al - trunk_rec_al.mean(dim=-1, keepdim=True)) / (
+            trunk_rec_al.std(dim=-1, keepdim=True) + 1.0
+        )
+        mgm_recon_al = (0.01 * trunk_rec_rel + mgm_z_delta) * x_obs_std + x_obs_mean
         if g_in < self.n_genes:
-            mgm_delta_ctx = mgm_delta_ctx[:, :g_in]
+            mgm_recon_full = mgm_recon_al[:, :g_in]
         elif g_in > self.n_genes:
-            mgm_delta_ctx = torch.cat(
-                [mgm_delta_ctx, torch.zeros(bsz, g_in - self.n_genes, device=device, dtype=dtype)], dim=-1
+            mgm_recon_full = torch.cat(
+                [mgm_recon_al, torch.zeros(bsz, g_in - self.n_genes, device=device, dtype=dtype)], dim=-1
             )
-        mgm_recon_full = trunk_out["mgm_recon"] + mgm_delta_ctx
+        else:
+            mgm_recon_full = mgm_recon_al
 
         # 3. Compositional chemical, genetic, media & physical nanoparticle perturbations
         pert_out = self.perturbation_op(batch, bsz=bsz, device=device, dtype=dtype, p_hat=p_hat, z_cell=z_cell)
@@ -653,9 +816,15 @@ class FerroFluxFM(nn.Module):
 
         if self.ablate_cis_reg or epigen is None:
             cis_locus_ctx = torch.zeros(bsz, 64, device=device, dtype=dtype)
+            cis_locus_mask = torch.zeros(bsz, 64, device=device, dtype=dtype)
         else:
             ep_al = self.cis_reg_slot._align_feature_shape(epigen.to(device=device, dtype=dtype))
-            cis_locus_ctx = 0.5 * ep_al[:, :64, 0] + 0.5 * ep_al[:, :64, 2]
+            cis_locus_ctx = 0.35 * ep_al[:, :64, 0] + 0.35 * ep_al[:, :64, 2] + 0.30 * ep_al[:, :64, 1:].mean(dim=-1)
+            if cis_mask is not None:
+                cm_al = self._align_ctx_field(batch, "cis_reg_mask", None, bsz, 64, device, dtype).clamp(0.0, 1.0)
+                cis_locus_mask = cm_al
+            else:
+                cis_locus_mask = (cis_locus_ctx.abs() > 1e-6).to(dtype=dtype)
 
         # 4 & 5. Sec46 translational gate + DiffFerroGEM grey-box peroxidation layer
         sec_out, gem_out, h_ferro_gem = self._compute_sec46_and_gem(
@@ -671,6 +840,8 @@ class FerroFluxFM(nn.Module):
             gene_expr_raw=x_aligned * eff_obs_m,
             gene_expr_mask=eff_obs_m,
             cis_locus_ctx=cis_locus_ctx,
+            extra_cell_mask=extra_cell_mask,
+            cis_locus_mask=cis_locus_mask,
         )
         e_gpx4_active = sec_out["e_gpx4_active"]
         pl_ooh = gem_out["pl_ooh"]
@@ -707,20 +878,29 @@ class FerroFluxFM(nn.Module):
         else:
             h_ferro = h_ferro_gem
 
+        ferro_occ_max = target_occ[:, :13].max(dim=-1).values.clamp(0.0, 1.0)
+        non_ferro_drug_gate = (1.0 - 0.85 * ferro_occ_max).clamp(min=0.05)
         apop_cell_lat = self.apop_cell_proj(torch.cat([z_cell, gene_expr_ctx, extra_cell_ctx], dim=-1))
         apop_chem_lat = self.apop_chem_proj(z_chem_active)
         apop_bi_in = torch.cat([apop_cell_lat, apop_chem_lat, apop_cell_lat * apop_chem_lat], dim=-1)
-        apop_gain = torch.exp(2.4 * torch.tanh(self.apop_bilinear_head(apop_bi_in).squeeze(-1)))
+        apop_gain = torch.exp(0.50 * torch.tanh(self.apop_bilinear_head(apop_bi_in).squeeze(-1)))
         drug_active_any = (z_chem_active.abs().sum(dim=-1) > 1e-6).to(dtype=dtype)
-        intrinsic_drug_haz = F.softplus(self.apop_intrinsic_drug_head(apop_cell_lat).squeeze(-1)) * 0.28 * drug_active_any
+        intrinsic_drug_haz = (
+            F.softplus(self.apop_intrinsic_drug_head(apop_cell_lat).squeeze(-1)) * 0.04 * drug_active_any * non_ferro_drug_gate
+        )
         h_apop = (
-            (F.softplus(self.apop_cell_head(z_cell).squeeze(-1)) * 0.03 + intrinsic_drug_haz + pert_out["k_apop_drug"] * apop_gain)
+            (
+                F.softplus(self.apop_cell_head(z_cell).squeeze(-1)) * 0.02
+                + intrinsic_drug_haz
+                + pert_out["k_apop_drug"] * apop_gain * non_ferro_drug_gate
+            )
             / (1.0 + 2.0 * pert_out["zvad_conc"])
         ).clamp(min=1e-6)
 
-        necro_gain = torch.exp(2.0 * torch.tanh(self.necro_bilinear_head(torch.cat([z_cell, z_chem_active], dim=-1)).squeeze(-1)))
+        necro_gain = torch.exp(0.50 * torch.tanh(self.necro_bilinear_head(torch.cat([z_cell, z_chem_active], dim=-1)).squeeze(-1)))
         h_necro = (
-            F.softplus(self.necro_cell_head(z_cell).squeeze(-1)) * 0.03 + pert_out["k_necro_drug"] * necro_gain
+            F.softplus(self.necro_cell_head(z_cell).squeeze(-1)) * 0.02
+            + pert_out["k_necro_drug"] * necro_gain * non_ferro_drug_gate
         ).clamp(min=1e-6)
 
         cupro_in = torch.cat([z_cell, gene_expr_ctx, F.silu(self.cupro_ctx_proj(extra_cell_ctx))], dim=-1)
@@ -1105,7 +1285,7 @@ class FerroFluxFM(nn.Module):
             "z_cell": z_cell,
             "z_modules": trunk_out["z_modules"],
             "p_hat": p_hat,
-            "p_hat_log": trunk_out["p_hat_log"],
+            "p_hat_log": p_hat_log,
             "m0_hat": m0_hat,
             "metab_anchor_pred": metab_10_pred,
             "oxylipid_pred": oxylipid_4_pred,

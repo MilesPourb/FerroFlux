@@ -277,14 +277,24 @@ class CompositionalPerturbationOperator(nn.Module):
         self.sar_anchor_head = copy.deepcopy(self.sar_pretrain_head).requires_grad_(False)
         self.register_buffer("has_sar_snapshot", torch.tensor(0, dtype=torch.int64), persistent=True)
 
-        # Factored Scaffold-Invariant (Desc + MACCS + Full Frozen SAR + Dose) + Shared-ECFP Dosed Chemical Encoder
+        # Factored Scaffold-Invariant (Desc + MACCS + Full Frozen SAR + Dose + SARxDose Hill) + Shared-ECFP Dosed Chemical Encoder
         self.ecfp_sub_dim = min(3072, self.chem_fp_dim)
         self.maccs_sub_dim = max(0, self.chem_fp_dim - 3072)
         self.sar_snap_dim = 2 * self.n_sar_targets + self.d_latent
-        self.scaf_dense_dim = self.chem_desc_dim + self.maccs_sub_dim + self.sar_snap_dim + 4 + self.chem_desc_dim
+        self.sar_dose_dim = 2 * self.n_sar_targets
+        self.scaf_dense_dim = (
+            self.chem_desc_dim + self.maccs_sub_dim + self.sar_snap_dim + 4 + self.chem_desc_dim + self.sar_dose_dim
+        )
         self.register_buffer("chem_dense_mean", torch.zeros(self.scaf_dense_dim, dtype=torch.float32), persistent=True)
         self.register_buffer("chem_dense_scale", torch.ones(self.scaf_dense_dim, dtype=torch.float32), persistent=True)
         self.register_buffer("shared_ecfp_mask", torch.ones(self.ecfp_sub_dim, dtype=torch.float32), persistent=True)
+        self.max_train_chem_bank = 160
+        self.register_buffer(
+            "train_chem_ecfp_bank",
+            torch.zeros(self.max_train_chem_bank, 2048, dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer("n_train_chem_bank", torch.tensor(0, dtype=torch.int64), persistent=True)
 
         d_ecfp_br = max(64, self.d_latent // 2)
         self.chem_scaffold_inv_enc = nn.Sequential(
@@ -312,7 +322,7 @@ class CompositionalPerturbationOperator(nn.Module):
 
         # Learnable SMARTS warhead / pharmacophore pEC50 gains (initialized modest ~0.45-0.85 pEC50 units; zero saturation cliff!)
         self.raw_motif_gains = nn.Parameter(
-            torch.tensor([-0.25, -0.10, -0.60, -0.50, -0.45, -0.50, 0.55, 0.25], dtype=torch.float32)
+            torch.tensor([-0.20, 0.05, -0.60, -0.50, -0.45, -0.50, 0.55, 0.25], dtype=torch.float32)
         )
 
         # Cell-state bioactivation / efflux FiLM modulation on drug target pEC50 (`dose == 0 -> occ == 0` preserved!)
@@ -391,19 +401,20 @@ class CompositionalPerturbationOperator(nn.Module):
     ) -> torch.Tensor:
         """Construct `[B, scaf_dense_dim]` scaffold-generalizing chemical + SAR + dose vector."""
         bsz = fp_aligned.shape[0]
-        if self.ablate_chem_prior or self.ablate_sec46_gate:
-            maccs = torch.zeros(bsz, self.maccs_sub_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+        maccs = (
+            fp_aligned[:, 3072 : 3072 + self.maccs_sub_dim]
+            if self.maccs_sub_dim > 0 and fp_aligned.shape[-1] > 3072
+            else torch.zeros(bsz, self.maccs_sub_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+        )
+        if self.ablate_chem_prior:
             sar_vec = torch.zeros(bsz, self.sar_snap_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
         else:
-            maccs = (
-                fp_aligned[:, 3072 : 3072 + self.maccs_sub_dim]
-                if self.maccs_sub_dim > 0 and fp_aligned.shape[-1] > 3072
-                else torch.zeros(bsz, self.maccs_sub_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
-            )
             sar_vec = self.compute_frozen_sar_vector(fp_aligned, desc_aligned)
         desc_eff = desc_aligned.clone()
-        if self.ablate_sec46_gate and desc_eff.shape[-1] > 9:
-            desc_eff[:, 9:] = 0.0
+        if self.ablate_chem_prior and desc_eff.shape[-1] >= 12:
+            desc_eff[:, 6:12] = 0.0
+            if desc_eff.shape[-1] >= 24:
+                desc_eff[:, 18:24] = 0.0
         log1p_d = torch.log1p(dose_uM)
         d_feat4 = torch.stack(
             [
@@ -414,12 +425,40 @@ class CompositionalPerturbationOperator(nn.Module):
             ],
             dim=-1,
         )
-        return torch.cat([desc_eff, maccs, sar_vec, d_feat4, desc_eff * log1p_d.unsqueeze(-1)], dim=-1)
+        if self.ablate_chem_prior or int(self.has_sar_snapshot.item()) == 0:
+            sar_dose = torch.zeros(bsz, self.sar_dose_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+        else:
+            sar_pot_sig = sar_vec[:, : self.n_sar_targets]
+            sar_act_sig = sar_vec[:, self.n_sar_targets : 2 * self.n_sar_targets]
+            pred_pot = 4.0 + 5.5 * sar_pot_sig
+            ec50_sar = torch.pow(10.0, (6.0 - pred_pot).clamp(-3.5, 2.5))
+            d_u_col = dose_uM.unsqueeze(-1).clamp(min=0.0)
+            occ_sar = d_u_col / (ec50_sar + d_u_col + 1e-7)
+            sar_dose = torch.cat([occ_sar, sar_act_sig * log1p_d.unsqueeze(-1)], dim=-1)
+        return torch.cat([desc_eff, maccs, sar_vec, d_feat4, desc_eff * log1p_d.unsqueeze(-1), sar_dose], dim=-1)
+
+    @torch.no_grad()
+    def compute_max_train_tanimoto(self, fp: torch.Tensor | None, bsz: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Compute maximum ECFP4 Tanimoto similarity `[B]` to `train_chem_ecfp_bank` (`1.0` if bank unset or no drug)."""
+        n_bk = int(self.n_train_chem_bank.item())
+        if fp is None or n_bk <= 0:
+            return torch.ones(bsz, device=device, dtype=dtype)
+        fp_al = self._align_vec(fp.to(device=device, dtype=torch.float32), 2048)
+        q_bin = (fp_al > 0.5).to(torch.float32)
+        q_sum = q_bin.sum(dim=-1, keepdim=True)
+        has_q = (q_sum.squeeze(-1) > 0.5)
+        if not bool(has_q.any().item()):
+            return torch.ones(bsz, device=device, dtype=dtype)
+        bank = (self.train_chem_ecfp_bank[:n_bk].to(device=device, dtype=torch.float32) > 0.5).to(torch.float32)
+        b_sum = bank.sum(dim=-1).unsqueeze(0)
+        inter = torch.matmul(q_bin, bank.t())
+        union = (q_sum + b_sum - inter).clamp(min=1e-6)
+        max_tan = (inter / union).max(dim=-1).values
+        out_tan = torch.where(has_q, max_tan, torch.ones_like(max_tan))
+        return out_tan.to(dtype=dtype)
 
     def build_shared_ecfp_features(self, fp_aligned: torch.Tensor) -> torch.Tensor:
-        """Construct `[B, ecfp_sub_dim]` shared ECFP bits (`0` when chemical prior or Sec46 warhead gate is ablated)."""
-        if self.ablate_chem_prior or self.ablate_sec46_gate:
-            return torch.zeros(fp_aligned.shape[0], self.ecfp_sub_dim, device=fp_aligned.device, dtype=fp_aligned.dtype)
+        """Construct `[B, ecfp_sub_dim]` shared ECFP bits strictly from input SMILES structure."""
         return fp_aligned[:, : self.ecfp_sub_dim] * self.shared_ecfp_mask.to(
             device=fp_aligned.device, dtype=fp_aligned.dtype
         ).unsqueeze(0)
@@ -586,7 +625,7 @@ class CompositionalPerturbationOperator(nn.Module):
 
                 cys_p = self.cysdb_target_prior.to(device=device, dtype=dtype)
                 motif_cols = list(motif_boost.unbind(dim=-1))
-                motif_cols[TARGET_TO_IDX["GPX4_cov"]] = mg[0] * cov_w * cys_p[0]
+                motif_cols[TARGET_TO_IDX["GPX4_cov"]] = mg[0] * (cov_w + 0.15 * elec_m) * cys_p[0]
                 motif_cols[TARGET_TO_IDX["TXNRD1"]] = mg[1] * (0.8 * cov_w + 1.2 * elec_m) * cys_p[11]
                 motif_cols[TARGET_TO_IDX["GPX4_deg"]] = mg[2] * endop
                 motif_cols[TARGET_TO_IDX["SLC7A11"]] = mg[3] * quinaz
@@ -603,22 +642,32 @@ class CompositionalPerturbationOperator(nn.Module):
             occ = (dose_exp / (ec50_exp + dose_exp)) * active.unsqueeze(-1)
             # Gate Cu-ionophore occupancy by bidentate thiocarbonyl coordination + Stage-0.5 SAR channel
             cu_motif = desc_aligned[:, 11].clamp(min=0.0) if desc is not None else zeros_1
+            rta_motif = desc_aligned[:, 7].clamp(min=0.0) if desc is not None else zeros_1
+            chel_motif = desc_aligned[:, 8].clamp(min=0.0) if desc is not None else zeros_1
+            elec_warhead = (
+                ((desc_aligned[:, 6].clamp(min=0.0) + (desc_aligned[:, 23].clamp(min=0.0) if desc_aligned.shape[-1] > 23 else zeros_1)) > 0.2).to(dtype=dtype)
+                if desc is not None
+                else zeros_1
+            )
             p_is_cu = torch.sigmoid(raw[:, TARGET_TO_IDX["FDX1_Cu"]] - 3.2 + 5.0 * cu_motif + 1.2 * sar_feats[:, 12])
             occ_cols = list(occ.unbind(dim=-1))
             occ_cols[TARGET_TO_IDX["FDX1_Cu"]] = occ_cols[TARGET_TO_IDX["FDX1_Cu"]] * p_is_cu
             occ = torch.stack(occ_cols, dim=-1)
 
-            rta_motif = desc_aligned[:, 7].clamp(min=0.0) if desc is not None else zeros_1
-            chel_motif = desc_aligned[:, 8].clamp(min=0.0) if desc is not None else zeros_1
+            rta_allowed = 1.0 - has_desc_vals * (1.0 - (rta_motif > 0.05).to(dtype=dtype))
+            chel_allowed = 1.0 - has_desc_vals * (1.0 - (chel_motif > 0.05).to(dtype=dtype))
             sar_rescuer_logit = sar_raw[:, 2 * self.n_sar_targets - 1].clamp(-4.0, 4.0)
-            p_is_rta = torch.sigmoid(raw[:, 2 * n_t] - 3.0 + 3.0 * rta_motif + 0.65 * sar_rescuer_logit)
-            p_is_chel = torch.sigmoid(raw[:, 2 * n_t + 1] - 3.0 + 3.2 * chel_motif)
+            p_is_rta = (
+                torch.sigmoid(raw[:, 2 * n_t] - 3.0 + 3.0 * rta_motif + 0.65 * sar_rescuer_logit - 2.0 * elec_warhead)
+                * rta_allowed
+            )
+            p_is_chel = torch.sigmoid(raw[:, 2 * n_t + 1] - 3.0 + 3.2 * chel_motif - 2.0 * elec_warhead) * chel_allowed
             k_rta = p_is_rta * F.softplus(raw[:, 2 * n_t]) * torch.log1p(dose_uM) * active
             k_chelate = p_is_chel * F.softplus(raw[:, 2 * n_t + 1]) * torch.log1p(dose_uM) * active
 
         apop_desc_logit = self.desc_apop_head(torch.cat([desc_aligned, sar_feats.detach()], dim=-1)).squeeze(-1)
-        k_apop = F.softplus(raw[:, 2 * n_t + 2] + apop_desc_logit - 1.2) * torch.log1p(dose_uM) * active
-        k_necro = F.softplus(raw[:, 2 * n_t + 3] - 1.4) * torch.log1p(dose_uM) * active
+        k_apop = F.softplus(raw[:, 2 * n_t + 2] + apop_desc_logit - 2.6) * torch.log1p(dose_uM) * active
+        k_necro = F.softplus(raw[:, 2 * n_t + 3] - 2.6) * torch.log1p(dose_uM) * active
 
         dose_feat = torch.stack(
             [
@@ -723,6 +772,7 @@ class CompositionalPerturbationOperator(nn.Module):
         k_necro_drug = necro_a + necro_b
         z_chem_active = z_chem_a + z_chem_b
         z_chem_scaf = z_scaf_a + z_scaf_b
+        chem_train_tanimoto = self.compute_max_train_tanimoto(fp_a, bsz=bsz, device=device, dtype=dtype)
 
         rta_conc = self._extract_1d(batch, ("rta_conc", "liproxstatin_1", "ferrostatin_1"), bsz, device, dtype, 0.0).clamp(min=0.0)
         chelator_conc = self._extract_1d(batch, ("chelator_conc", "dfo_conc", "cpx_conc"), bsz, device, dtype, 0.0).clamp(min=0.0)
@@ -910,6 +960,7 @@ class CompositionalPerturbationOperator(nn.Module):
             "pred_pec50": pec50_a,
             "z_chem_active": z_chem_active,
             "z_chem_scaf": z_chem_scaf,
+            "chem_train_tanimoto": chem_train_tanimoto,
             "bliss_interaction": bliss_interaction,
             "k_rta_drug": k_rta_drug,
             "k_chelate_drug": k_chelate_drug,

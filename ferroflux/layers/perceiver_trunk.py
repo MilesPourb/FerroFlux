@@ -259,7 +259,12 @@ class GeneToModulePerceiverTrunk(nn.Module):
         )
         self.register_buffer(
             "anchor_mrna_ref",
-            torch.full((len(ANCHOR_28_PROTEINS),), 1.5, dtype=torch.float32),
+            torch.zeros(len(ANCHOR_28_PROTEINS), dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "anchor_mrna_log_basal",
+            torch.full((len(ANCHOR_28_PROTEINS),), 1.8, dtype=torch.float32),
             persistent=True,
         )
 
@@ -421,15 +426,21 @@ class GeneToModulePerceiverTrunk(nn.Module):
             p_hat = torch.ones_like(p_hat_log)
             m0_hat = torch.ones_like(m0_hat_log)
         else:
-            # Respect eff_mask on direct_mrna so masked genes (in MGM or Stage-0 mask-out tests) never leak!
+            # Respect eff_mask on direct_mrna so masked genes (in MGM or Stage-0 mask-out tests) never leak,
+            # and normalize by observed row std + anchor_mrna_ref so p_hat_log is platform-invariant & centered ~ 0!
+            row_cnt = eff_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            row_mu = (x_raw * eff_mask).sum(dim=-1, keepdim=True) / row_cnt
+            row_var = ((x_raw - row_mu) * eff_mask).pow(2).sum(dim=-1, keepdim=True) / row_cnt
+            row_std = (row_var + 0.25).sqrt()
+            x_rel = (x_raw - row_mu) / row_std
             anchor_obs = eff_mask[:, self.anchor_gene_idx]
-            direct_mrna = (x_raw[:, self.anchor_gene_idx] * anchor_obs) * F.softplus(
+            direct_mrna = ((x_rel[:, self.anchor_gene_idx] - self.anchor_mrna_ref.to(dtype=dtype)) * anchor_obs) * F.softplus(
                 self.direct_mrna_to_prot_gain.to(dtype=dtype)
             )
             p_hat_log = self.protein_anchor_head(z_pathway) + direct_mrna
             m0_hat_log = self.metabolite_anchor_head(z_cell)
-            p_hat = F.softplus(p_hat_log) + 0.05
-            m0_hat = F.softplus(m0_hat_log) + 0.05
+            p_hat = F.softplus(p_hat_log + self.anchor_mrna_log_basal.to(dtype=dtype)) + 0.05
+            m0_hat = F.softplus(m0_hat_log + 0.65) + 0.05
 
         mgm_recon = self.decode_expr(z_cell, n_out_genes=orig_g)
         mgm_recon_rel = mgm_recon - mgm_recon.mean(dim=-1, keepdim=True)
